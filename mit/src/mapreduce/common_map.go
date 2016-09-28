@@ -46,6 +46,7 @@ mapF func(file string, contents string) []KeyValue,
 
 	// my implement
 	// 1. 打开输入文件
+	debug("DEBUG: Map inFile: %s, MapTaskNumber: %d, nReduce: %d, jobName: %s\n", inFile, mapTaskNumber, nReduce, jobName)
 	file, err := os.Open(inFile)
 	if err != nil {
 		log.Fatal("Open file error: ", err)
@@ -63,24 +64,28 @@ mapF func(file string, contents string) []KeyValue,
 	file.Close()
 	// 2. 处理得到keyValue
 	keyValues := mapF(inFile, string(buf))
+	debug("DEBUG: Map result size: %v\n", len(keyValues))
 	// 3. hash得到reducer num
 	intermediateDecoders := map[string]*json.Encoder{}
 	intermediateFiles := map[string]*os.File{}
 	for _, value := range keyValues {
-		rN := ihash(value.Key) % nReduce
-		intermediateName := reduceName(jobName, mapTaskNumber, rN)
+		rN := ihash(value.Key) % uint32(nReduce)
+		intermediateName := reduceName(jobName, mapTaskNumber, int(rN))
 		// 4. 输出到中间文件
 		enc, exists := intermediateDecoders[intermediateName]
+		//log.Println("intermediateFile:",intermediateName)
 		if !exists {
 			// 打开文件
 			file, err := os.Create(intermediateName)
+			//debug("%s\n",file.Name())
 			if err != nil {
 				log.Fatal("Open file error: ", err)
 			}
-			enc := json.NewEncoder(file)
+			enc = json.NewEncoder(file)
 			intermediateDecoders[intermediateName] = enc
 			intermediateFiles[intermediateName] = file
 		}
+		//log.Println(index,value)
 		err := enc.Encode(&value)
 		if err != nil {
 			log.Fatal("Encoder error: ", err)

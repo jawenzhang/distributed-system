@@ -42,6 +42,7 @@ func doReduce(
 	keyValues := map[string][]string{}
 	for i:=0;i<nMap;i++ {
 		intermediateName := reduceName(jobName,i,reduceTaskNumber)
+		//log.Println("reduce intermediateFile:",intermediateName)
 		if _, err := os.Stat(intermediateName); os.IsNotExist(err) {
 			debug("file:%s not exist\n",intermediateName)
 			return
@@ -50,7 +51,6 @@ func doReduce(
 		if err != nil {
 			log.Fatal("Open file error: ",err)
 		}
-		file.Close()
 
 		dec := json.NewDecoder(file)
 
@@ -66,9 +66,11 @@ func doReduce(
 				keyValues[value.Key] = []string{value.Value}
 			}
 		}
+		file.Close()
 	}
-
-	mergeFile,err  := os.Create(mergeName(jobName,reduceTaskNumber))
+	mergeFileName := mergeName(jobName,reduceTaskNumber)
+	//log.Println("mergeFileName:",mergeFileName)
+	mergeFile,err  := os.Create(mergeFileName)
 	if err != nil {
 		log.Fatal("Create file err: ",err)
 	}
