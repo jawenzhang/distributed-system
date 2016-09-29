@@ -45,7 +45,7 @@ func doReduce(
 		//log.Println("reduce intermediateFile:",intermediateName)
 		if _, err := os.Stat(intermediateName); os.IsNotExist(err) {
 			debug("file:%s not exist\n",intermediateName)
-			return
+			continue
 		}
 		file, err := os.Open(intermediateName)
 		if err != nil {

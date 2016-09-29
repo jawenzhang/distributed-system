@@ -31,25 +31,30 @@ func (mr *Master) schedule(phase jobPhase) {
 	for i := 0; i < ntasks; i++ {
 		go func(i int) {
 			wg.Add(1)
-			worker := <- mr.registerChannel
-
-			debug("Master: schdule worker %s\n", worker)
-			arg := &DoTaskArgs{
-				JobName:mr.jobName,
-				File:mr.files[i],
-				Phase:phase,
-				TaskNumber:i,
-				NumOtherPhase:nios,
+			defer wg.Done()
+			for {
+				// 每次循环都新取出一个worker
+				worker := <- mr.registerChannel
+				debug("Master: schdule worker %s\n", worker)
+				arg := &DoTaskArgs{
+					JobName:mr.jobName,
+					File:mr.files[i],
+					Phase:phase,
+					TaskNumber:i,
+					NumOtherPhase:nios,
+				}
+				ok := call(worker, "Worker.DoTask", arg, new(struct{}))
+				// 如果失败，表示worker失效，不在放回
+				if ok {
+					go func() {
+						//表示空闲了，必须单独放入goroutine中
+						mr.registerChannel <- worker
+					}()
+					break
+				} else {
+					fmt.Printf("Worker: RPC %s DoTask error\n", worker)
+				}
 			}
-			ok := call(worker, "Worker.DoTask", arg, new(struct{}))
-			if ok == false {
-				fmt.Printf("Worker: RPC %s DoTask error\n", worker)
-			} else {
-				go func() {
-					mr.registerChannel <- worker
-				}()
-			}
-			wg.Done()
 		}(i)
 	}
 	wg.Wait()
