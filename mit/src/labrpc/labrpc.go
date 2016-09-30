@@ -60,9 +60,9 @@ import "time"
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
 	svcMeth  string      // e.g. "Raft.AppendEntries"
-	argsType reflect.Type
-	args     []byte
-	replyCh  chan replyMsg
+	argsType reflect.Type // 请求参数类型
+	args     []byte // 请求参数值
+	replyCh  chan replyMsg //在 Call 中读取，在 ProcessReq 中写入
 }
 
 type replyMsg struct {
@@ -70,6 +70,7 @@ type replyMsg struct {
 	reply []byte
 }
 
+// 模拟客户端，请求写入到 ch 后传到 Network 中去处理
 type ClientEnd struct {
 	endname interface{} // this end-point's name
 	ch      chan reqMsg // copy of Network.endCh
@@ -107,13 +108,13 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 
 type Network struct {
 	mu             sync.Mutex
-	reliable       bool
+	reliable       bool                        // 是否可靠
 	longDelays     bool                        // pause a long time on send on disabled connection
 	longReordering bool                        // sometimes delay replies a long time
-	ends           map[interface{}]*ClientEnd  // ends, by name
-	enabled        map[interface{}]bool        // by end name
-	servers        map[interface{}]*Server     // servers, by name
-	connections    map[interface{}]interface{} // endname -> servername
+	ends           map[interface{}]*ClientEnd  // 记录客户端，ends, by name
+	enabled        map[interface{}]bool        // 记录客户端是否有效 by end name
+	servers        map[interface{}]*Server     // 记录服务端 servers, by name
+	connections    map[interface{}]interface{} // 记录客户端和服务端的连接 endname -> servername
 	endCh          chan reqMsg
 }
 
@@ -128,6 +129,7 @@ func MakeNetwork() *Network {
 
 	// single goroutine to handle all ClientEnd.Call()s
 	go func() {
+		// 对于每个请求，都启动一个goroutine处理
 		for xreq := range rn.endCh {
 			go rn.ProcessReq(xreq)
 		}
@@ -158,7 +160,7 @@ func (rn *Network) LongDelays(yes bool) {
 }
 
 func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool,
-	servername interface{}, server *Server, reliable bool, longreordering bool,
+servername interface{}, server *Server, reliable bool, longreordering bool,
 ) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -172,28 +174,29 @@ func (rn *Network) ReadEndnameInfo(endname interface{}) (enabled bool,
 	longreordering = rn.longReordering
 	return
 }
-
+// 判断server是否已经下线了
 func (rn *Network) IsServerDead(endname interface{}, servername interface{}, server *Server) bool {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
-
+	// 客户端已经断开或者server已经换了
 	if rn.enabled[endname] == false || rn.servers[servername] != server {
 		return true
 	}
 	return false
 }
 
+// 在处理的过程中，根据network配置，模拟各种网络故障
 func (rn *Network) ProcessReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.ReadEndnameInfo(req.endname)
 
 	if enabled && servername != nil && server != nil {
 		if reliable == false {
-			// short delay
+			// 不可靠连接，延迟返回，short delay
 			ms := (rand.Int() % 27)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-
-		if reliable == false && (rand.Int()%1000) < 100 {
+		// 不可靠，直接返回false，丢弃请求
+		if reliable == false && (rand.Int() % 1000) < 100 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 			return
@@ -206,12 +209,15 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		ech := make(chan replyMsg)
 		go func() {
 			r := server.dispatch(req)
+			// 此处有个bug，如果server关闭了，那没有地方会去读ech了，那goroutine会一直阻塞在此处
 			ech <- r
 		}()
 
 		// wait for handler to return,
 		// but stop waiting if DeleteServer() has been called,
 		// and return an error.
+		// 等待 server.dispatch 处理完，并从 ech 读取响应
+		// 但是每隔 100ms 检查一次 server 是否已经 dead
 		var reply replyMsg
 		replyOK := false
 		serverDead := false
@@ -230,17 +236,20 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		// to an Append, but the server persisted the update
 		// into the old Persister. config.go is careful to call
 		// DeleteServer() before superseding the Persister.
+		// 防止请求返回了，但是server已经删除
 		serverDead = rn.IsServerDead(req.endname, servername, server)
 
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
 			req.replyCh <- replyMsg{false, nil}
-		} else if reliable == false && (rand.Int()%1000) < 100 {
+		} else if reliable == false && (rand.Int() % 1000) < 100 {
+			// 如果是不可靠连接，则有概率还是丢弃请求
 			// drop the reply, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
-			ms := 200 + rand.Intn(1+rand.Intn(2000))
+			// 如果开启了长请求，则sleep一段时间
+			ms := 200 + rand.Intn(1 + rand.Intn(2000))
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 			req.replyCh <- reply
 		} else {
@@ -266,6 +275,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 
 // create a client end-point.
 // start the thread that listens and delivers.
+// 创建一个客户端
 func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -283,14 +293,14 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 
 	return e
 }
-
+// 新增一个服务端
 func (rn *Network) AddServer(servername interface{}, rs *Server) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 
 	rn.servers[servername] = rs
 }
-
+// 删除一个服务端
 func (rn *Network) DeleteServer(servername interface{}) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -300,6 +310,7 @@ func (rn *Network) DeleteServer(servername interface{}) {
 
 // connect a ClientEnd to a server.
 // a ClientEnd can only be connected once in its lifetime.
+// 将客户端和服务端连接起来，一个客户端只能和一个服务端连接
 func (rn *Network) Connect(endname interface{}, servername interface{}) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -308,6 +319,7 @@ func (rn *Network) Connect(endname interface{}, servername interface{}) {
 }
 
 // enable/disable a ClientEnd.
+// 打开/关闭一个客户端
 func (rn *Network) Enable(endname interface{}, enabled bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -316,6 +328,7 @@ func (rn *Network) Enable(endname interface{}, enabled bool) {
 }
 
 // get a server's count of incoming RPCs.
+// 获取客户端的rpc请求个数
 func (rn *Network) GetCount(servername interface{}) int {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -331,8 +344,8 @@ func (rn *Network) GetCount(servername interface{}) int {
 //
 type Server struct {
 	mu       sync.Mutex
-	services map[string]*Service
-	count    int // incoming RPCs
+	services map[string]*Service // 提供的服务
+	count    int                 // incoming RPCs
 }
 
 func MakeServer() *Server {
@@ -346,7 +359,7 @@ func (rs *Server) AddService(svc *Service) {
 	defer rs.mu.Unlock()
 	rs.services[svc.name] = svc
 }
-
+// 分发请求到对应的处理函数
 func (rs *Server) dispatch(req reqMsg) replyMsg {
 	rs.mu.Lock()
 
@@ -355,7 +368,7 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 	// split Raft.AppendEntries into service and method
 	dot := strings.LastIndex(req.svcMeth, ".")
 	serviceName := req.svcMeth[:dot]
-	methodName := req.svcMeth[dot+1:]
+	methodName := req.svcMeth[dot + 1:]
 
 	service, ok := rs.services[serviceName]
 
@@ -364,6 +377,7 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 	if ok {
 		return service.dispatch(methodName, req)
 	} else {
+		// 无对应的服务
 		choices := []string{}
 		for k, _ := range rs.services {
 			choices = append(choices, k)
@@ -373,7 +387,7 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 		return replyMsg{false, nil}
 	}
 }
-
+// 获取rpc请求个数
 func (rs *Server) GetCount() int {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -383,12 +397,12 @@ func (rs *Server) GetCount() int {
 // an object with methods that can be called via RPC.
 // a single server may have more than one Service.
 type Service struct {
-	name    string
-	rcvr    reflect.Value
-	typ     reflect.Type
-	methods map[string]reflect.Method
+	name    string                    // 服务名称
+	rcvr    reflect.Value             // 提供服务对象的值
+	typ     reflect.Type              // 提供服务对象的类型
+	methods map[string]reflect.Method // 提供的方法
 }
-
+// 创建一个service,自动获取传入对象的值，类型和方法
 func MakeService(rcvr interface{}) *Service {
 	svc := &Service{}
 	svc.typ = reflect.TypeOf(rcvr)
@@ -403,10 +417,10 @@ func MakeService(rcvr interface{}) *Service {
 
 		//fmt.Printf("%v pp %v ni %v 1k %v 2k %v no %v\n",
 		//	mname, method.PkgPath, mtype.NumIn(), mtype.In(1).Kind(), mtype.In(2).Kind(), mtype.NumOut())
-
+		// 检查方法是否符合规则，大写，输入参数2个，输出一个，第二个输入参数指针
 		if method.PkgPath != "" || // capitalized?
 			mtype.NumIn() != 3 ||
-			//mtype.In(1).Kind() != reflect.Ptr ||
+		//mtype.In(1).Kind() != reflect.Ptr ||
 			mtype.In(2).Kind() != reflect.Ptr ||
 			mtype.NumOut() != 0 {
 			// the method is not suitable for a handler
@@ -419,9 +433,10 @@ func MakeService(rcvr interface{}) *Service {
 
 	return svc
 }
-
+// 完成请求
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
+		// 主要通过反射完成请求
 		// prepare space into which to read the argument.
 		// the Value's type will be a pointer to req.argsType.
 		args := reflect.New(req.argsType)
