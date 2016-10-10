@@ -57,6 +57,7 @@ import "strings"
 import "math/rand"
 import "time"
 
+
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
 	svcMeth  string      // e.g. "Raft.AppendEntries"
@@ -94,6 +95,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	e.ch <- req
 
 	rep := <-req.replyCh
+	//log.Println("rep:",rep)
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
 		rd := gob.NewDecoder(rb)
@@ -229,7 +231,8 @@ func (rn *Network) ProcessReq(req reqMsg) {
 				serverDead = rn.IsServerDead(req.endname, servername, server)
 			}
 		}
-
+		//log.Println("replyOK:",replyOK)
+		//log.Println("reply:",reply)
 		// do not reply if DeleteServer() has been called, i.e.
 		// the server has been killed. this is needed to avoid
 		// situation in which a client gets a positive reply

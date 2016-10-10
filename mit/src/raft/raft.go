@@ -174,29 +174,41 @@ type AppendEntiesReply struct {
 
 //
 // 如果收到一个大于自己任期的投票请求，怎么处理？需要将自己的votedFor更新嘛？
-//
+// 原则：If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
+// 如果收到的请求或者响应中，包含的term大于当前的currentTerm，设置currentTerm=term，然后变为follower
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+
 	// 收到投票请求，判断candidate的任期是否大于自己的任期，是则更新自己的任期
 	// 检查当前任期是否已经投票了，是则告知已投
 	// 检查candidate的日志是不是比自己的日志新
 	// 1. Reply false if term < currentTerm
 	log.Println("peer:", rf.me, "deal RequestVote from candidate:", args.CandidateId)
 
-	if args.Term < rf.currentTerm {
+	// granting vote to candidate,类似收到心跳，会重置election timeout
+	rf.heartbeatChan <- true
+
+	reply.Term = rf.currentTerm
+	currentTerm := rf.currentTerm
+
+	if args.Term > currentTerm {
+		// 大于则直接转换为follower，并更新当前的currentTerm
+		rf.setTermAndConvertToFollower(args.Term)
+	}
+
+	if args.Term < currentTerm {
+		// 过时的请求
+		log.Println("previous term:",args.Term,"currentTerm:",currentTerm)
 		reply.VoteGranted = false
 	} else if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		log.Println("follower:",rf.me,"has votedFor:",rf.votedFor)
 		reply.VoteGranted = false
-	} else if args.LastLogIndex < rf.commitIndex || args.LastLogTerm < rf.currentTerm {
+	} else if args.LastLogIndex < rf.commitIndex || args.LastLogTerm < currentTerm {
 		//检查candidate的日志是不是比自己的日志新
+		log.Println("candidate:",args.CandidateId,"'slog is not at least as up-to-date as receiver’s log")
 		reply.VoteGranted = false
 	} else {
 		reply.VoteGranted = true
-		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-		}
 	}
-	reply.Term = rf.currentTerm
 	log.Println("deal RequestVote done, voteGranted:", reply.VoteGranted)
 }
 
@@ -207,22 +219,19 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	// Your code here.
 	// 如果是宣称leader的请求，判断任期是否小于，小于的都丢弃
 	// 如果等于或者大于则承认身份，并将状态改为follower
-	reply.Term = rf.currentTerm
 
+	reply.Term = rf.currentTerm
+	currentTerm := rf.currentTerm
 	// 小于的都丢弃
-	if args.Term < rf.currentTerm {
+	if args.Term < currentTerm {
 		reply.Success = false
 		return
+	}else if args.Term > currentTerm{
+		rf.setTermAndConvertToFollower(args.Term)
 	}
-	rf.heartbeatChan <- true // 不应该阻塞，chan有1
+	rf.heartbeatChan <- true // 不应该阻塞，chan有1,心跳
 	if len(args.Entries) == 0 {
 		// 宣称是leader的
-		rf.mu.Lock()
-		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-		}
-		rf.status = STATUS_FOLLOWER
-		rf.mu.Unlock()
 		reply.Success = true
 		return
 	}
@@ -340,6 +349,12 @@ func (rf *Raft)convertToLeader() {
 	rf.status = STATUS_LEADER
 	rf.mu.Unlock()
 }
+func (rf *Raft)setTermAndConvertToFollower(term int) {
+	rf.mu.Lock()
+	rf.currentTerm = term
+	rf.status = STATUS_FOLLOWER
+	rf.mu.Unlock()
+}
 
 // 广播投票信息
 func (rf *Raft)broadcastRequestVoteRPC() {
@@ -357,7 +372,7 @@ func (rf *Raft)broadcastRequestVoteRPC() {
 			if ok {
 				// 判断任期是否大于自己，如果大于则转换为follower,退出循环
 				if reply.Term > rf.currentTerm {
-					rf.convertToFollower()
+					rf.setTermAndConvertToFollower(reply.Term )
 					break
 				} else if reply.VoteGranted {
 					rf.votedCount++
@@ -392,7 +407,7 @@ func (rf *Raft)broadcastHeartbeat() {
 			if ok {
 				// 判断任期是否大于自己，如果大于则转换为follower,退出循环
 				if reply.Term > rf.currentTerm {
-					rf.convertToFollower()
+					rf.setTermAndConvertToFollower(reply.Term )
 					break
 				}
 			} else {
@@ -410,7 +425,7 @@ func (rf *Raft)leader() {
 		select {
 		case <-ticker:
 		// 发送心跳
-			log.Println("leader:",rf.me,"begin to broadcastHeartbeat")
+			log.Println("leader:", rf.me, "begin to broadcastHeartbeat")
 			go func() {
 				rf.broadcastHeartbeat()
 			}()
@@ -524,6 +539,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.status = STATUS_FOLLOWER
 	rf.electionTimeout = 1000 * time.Millisecond // 1000ms
 	rf.heartbeatTimeout = 500 * time.Millisecond
+	rf.currentTerm = 0
 	// Your initialization code here.
 	// 刚开始启动所有状态都是 follower，然后启动 election timeout 和 heartbeat timeout
 
