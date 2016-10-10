@@ -216,7 +216,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
-	// Your code here.
+
 	// 如果是宣称leader的请求，判断任期是否小于，小于的都丢弃
 	// 如果等于或者大于则承认身份，并将状态改为follower
 
@@ -437,13 +437,17 @@ func (rf *Raft)leader() {
 func (rf *Raft)candidate() {
 	var contiue = true
 	for {
-
+		// 已经有新的leader产生了，此处再检查一次是防止在下面select种没选择到
 		select {
 		case <-rf.heartbeatChan:
 			contiue = false
 		default:
 		}
 		if !contiue {
+			break
+		}
+		// 不是候选人了，退出选举
+		if rf.status != STATUS_CANDIDATE {
 			break
 		}
 
@@ -455,7 +459,6 @@ func (rf *Raft)candidate() {
 		rf.mu.Unlock()
 
 		// 第二步重置 election timer 并开始广播
-
 		go rf.broadcastRequestVoteRPC()
 
 		// 第三步等待结果
@@ -472,12 +475,15 @@ func (rf *Raft)candidate() {
 			} else {
 				// 选举失败，查看是否收到
 			}
+		case <-rf.heartbeatChan:
+			contiue = false
 		case <-time.After(rf.resetElectionTimeout()):
 		// 重新开始选举
 			go func() {
 				<-rf.voteResultChan
 			}()
 		}
+
 		if !contiue {
 			break
 		}
@@ -488,7 +494,8 @@ func (rf *Raft) loop() {
 	for {
 		switch rf.status {
 		case STATUS_FOLLOWER:
-			log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.resetElectionTimeout())
+			rf.resetElectionTimeout()
+			log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.randomizedElectionTimeout)
 			// 等待心跳，如果心跳未到，但是选举超时了，则开始新一轮选举
 				select {
 				case <-rf.heartbeatChan:
