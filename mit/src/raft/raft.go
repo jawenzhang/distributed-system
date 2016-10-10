@@ -184,16 +184,22 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// 1. Reply false if term < currentTerm
 	log.Println("peer:", rf.me, "deal RequestVote from candidate:", args.CandidateId)
 
-	// granting vote to candidate,类似收到心跳，会重置election timeout
-	rf.heartbeatChan <- true
+	//select {// 防止已经收到心跳了，写阻塞
+	//case rf.heartbeatChan <- true:
+	//default:
+	//}
 
 	reply.Term = rf.currentTerm
 	currentTerm := rf.currentTerm
 
 	if args.Term > currentTerm {
-		// 大于则直接转换为follower，并更新当前的currentTerm
-		rf.setTermAndConvertToFollower(args.Term)
+		// 大于则直接转换为follower，并更新当前的currentTerm和voteFor
+		log.Println("candidateId:",args.CandidateId,"has big term:",args.Term,"than follower:",rf.me,"currentTerm:",currentTerm,"status:",rf.status)
+		rf.resetStateAndConvertToFollower(args.Term)
 	}
+	// granting vote to candidate,类似收到心跳，会重置election timeout
+	log.Println("heartbeatChan len:",len(rf.heartbeatChan))
+	rf.heartbeatChan <- true // 目的了为了取消在follower状态下等待选举超时,但是当问题是在实现leader任务的时候，没有一个点触出发退出心跳
 
 	if args.Term < currentTerm {
 		// 过时的请求
@@ -202,11 +208,17 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		log.Println("follower:",rf.me,"has votedFor:",rf.votedFor)
 		reply.VoteGranted = false
-	} else if args.LastLogIndex < rf.commitIndex || args.LastLogTerm < currentTerm {
-		//检查candidate的日志是不是比自己的日志新
+	} else if rf.commitIndex != 0 && (args.LastLogIndex < rf.commitIndex || args.LastLogTerm < currentTerm) {
+		// rf.commitIndex == 0 表示还没有日志，则没必要检查
+		// 检查candidate的日志是不是比自己的日志新
 		log.Println("candidate:",args.CandidateId,"'slog is not at least as up-to-date as receiver’s log")
 		reply.VoteGranted = false
 	} else {
+
+		rf.mu.Lock()
+		rf.votedFor = args.CandidateId
+		rf.mu.Unlock()
+
 		reply.VoteGranted = true
 	}
 	log.Println("deal RequestVote done, voteGranted:", reply.VoteGranted)
@@ -224,19 +236,24 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	currentTerm := rf.currentTerm
 	// 小于的都丢弃
 	if args.Term < currentTerm {
+		log.Println("LeaderId:",args.LeaderId,"has small term:",args.Term,"than follower:",rf.me,"currentTerm:",currentTerm)
 		reply.Success = false
 		return
-	}else if args.Term > currentTerm{
-		rf.setTermAndConvertToFollower(args.Term)
 	}
+	if args.Term > currentTerm{
+		log.Println("LeaderId:",args.LeaderId,"has big term:",args.Term,"than follower:",rf.me,"currentTerm:",currentTerm)
+		rf.resetStateAndConvertToFollower(args.Term)
+	}
+
 	rf.heartbeatChan <- true // 不应该阻塞，chan有1,心跳
-	if len(args.Entries) == 0 {
-		// 宣称是leader的
-		reply.Success = true
-		return
-	}
-	//TODO 其他请求，暂时都忽略
 	return
+	//if len(args.Entries) == 0 {
+		// 宣称是leader的
+		//reply.Success = true
+		//return
+	//}
+	//TODO 其他请求，暂时都忽略
+	//return
 
 	// 如果是日志复制，检查prevLogIndex,prevLogTerm，如果找不到，则拒绝新的log
 	//1. Reply false if term < currentTerm
@@ -328,7 +345,7 @@ func (rf *Raft) Kill() {
 }
 func (rf *Raft)resetElectionTimeout() time.Duration {
 	//[electiontimeout, 2 * electiontimeout - 1]
-	rand.Seed(time.Now().UTC().UnixNano())
+	//rand.Seed(time.Now().UTC().UnixNano())
 	rf.randomizedElectionTimeout = rf.electionTimeout + time.Duration(rand.Int63n(rf.electionTimeout.Nanoseconds()))
 	return rf.randomizedElectionTimeout
 }
@@ -349,10 +366,12 @@ func (rf *Raft)convertToLeader() {
 	rf.status = STATUS_LEADER
 	rf.mu.Unlock()
 }
-func (rf *Raft)setTermAndConvertToFollower(term int) {
+
+func (rf *Raft)resetStateAndConvertToFollower(term int) {
 	rf.mu.Lock()
 	rf.currentTerm = term
 	rf.status = STATUS_FOLLOWER
+	rf.votedFor = -1
 	rf.mu.Unlock()
 }
 
@@ -367,29 +386,30 @@ func (rf *Raft)broadcastRequestVoteRPC() {
 				LastLogTerm:rf.log[rf.commitIndex].Term,
 			}
 			reply := &RequestVoteReply{}
-			log.Println("candidate:", args.CandidateId, "send RequestVote to peer:", i)
+			//log.Println("candidate:", args.CandidateId, "send RequestVote to peer:", i)
 			ok := rf.sendRequestVote(i, args, reply)
 			if ok {
 				// 判断任期是否大于自己，如果大于则转换为follower,退出循环
 				if reply.Term > rf.currentTerm {
-					rf.setTermAndConvertToFollower(reply.Term )
+					rf.resetStateAndConvertToFollower(reply.Term )
 					break
 				} else if reply.VoteGranted {
 					rf.votedCount++
 				} else {
-					// do nothing
+					// 没投票给自己
 				}
 			} else {
 				// rpc失败，不断重试？
 			}
 		}
 	}
-	if rf.votedCount > int(len(rf.peers) / 2) {
+	if rf.votedCount > len(rf.peers) / 2 {
 		// 选举成功，否则失败
 		rf.voteResultChan <- true
-	} else {
-		rf.voteResultChan <- false
 	}
+	//} else {
+	//	rf.voteResultChan <- false
+	//}
 }
 // 广播心跳
 func (rf *Raft)broadcastHeartbeat() {
@@ -402,12 +422,12 @@ func (rf *Raft)broadcastHeartbeat() {
 				//prevLogTerm:rf.log[rf.commitIndex].Term,
 			}
 			reply := &AppendEntiesReply{}
-			log.Println("leader:", args.LeaderId, "send heartbeat to follower:", i)
+			//log.Println("leader:", args.LeaderId, "send heartbeat to follower:", i)
 			ok := rf.sendAppendEnties(i, args, reply)
 			if ok {
 				// 判断任期是否大于自己，如果大于则转换为follower,退出循环
 				if reply.Term > rf.currentTerm {
-					rf.setTermAndConvertToFollower(reply.Term )
+					rf.resetStateAndConvertToFollower(reply.Term )
 					break
 				}
 			} else {
@@ -420,15 +440,16 @@ func (rf *Raft)broadcastHeartbeat() {
 // 成为leader，开始心跳
 func (rf *Raft)leader() {
 	ticker := time.Tick(rf.heartbeatTimeout)
-
+	// 什么时候不是leader了退出
 	for {
+		if rf.status != STATUS_LEADER {
+			break
+		}
 		select {
 		case <-ticker:
 		// 发送心跳
-			log.Println("leader:", rf.me, "begin to broadcastHeartbeat")
-			go func() {
-				rf.broadcastHeartbeat()
-			}()
+		//	log.Println("leader:", rf.me, "begin to broadcastHeartbeat")
+			go rf.broadcastHeartbeat()
 		}
 	}
 }
@@ -473,15 +494,12 @@ func (rf *Raft)candidate() {
 				contiue = false
 				rf.convertToLeader()
 			} else {
-				// 选举失败，查看是否收到
+				// 选举失败，应该等待超时，然后重新开始新一轮选举，而不是马上开始新一轮选举，这样子造成彼此都不成功
 			}
 		case <-rf.heartbeatChan:
 			contiue = false
 		case <-time.After(rf.resetElectionTimeout()):
-		// 重新开始选举
-			go func() {
-				<-rf.voteResultChan
-			}()
+			// 重新开始选举
 		}
 
 		if !contiue {
@@ -501,7 +519,7 @@ func (rf *Raft) loop() {
 				case <-rf.heartbeatChan:
 				case <-time.After(rf.randomizedElectionTimeout):
 				// 开始重新选举
-					log.Println("election timeout:", rf.randomizedElectionTimeout)
+					log.Println("follower:",rf.me,"election timeout:", rf.randomizedElectionTimeout)
 					if rf.status != STATUS_FOLLOWER {
 						// panic
 						log.Fatal("status not right when in follower and after randomizedElectionTimeout:", rf.randomizedElectionTimeout)
