@@ -94,7 +94,7 @@ type Raft struct {
 type Log struct {
 	Term    int         // 任期,收到命令时，当前server的任期
 	Command interface{} // 命令
-	index   int         // 在数组中的位置
+	Index   int         // 在数组中的位置
 }
 
 // return currentTerm and whether this server
@@ -183,7 +183,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// 检查当前任期是否已经投票了，是则告知已投
 	// 检查candidate的日志是不是比自己的日志新
 	// 1. Reply false if term < currentTerm
-	log.Println("peer:", rf.me, "deal RequestVote from candidate:", args.CandidateId)
+	//log.Println("peer:", rf.me, "deal RequestVote from candidate:", args.CandidateId)
 
 	//select {// 防止已经收到心跳了，写阻塞
 	//case rf.heartbeatChan <- true:
@@ -195,24 +195,24 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > currentTerm {
 		// 大于则直接转换为follower，并更新当前的currentTerm和voteFor
-		log.Println("candidateId:", args.CandidateId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm, "status:", rf.status)
+		//log.Println("candidateId:", args.CandidateId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm, "status:", rf.status)
 		rf.resetStateAndConvertToFollower(args.Term)
 	}
 	// granting vote to candidate,类似收到心跳，会重置election timeout
-	log.Println("heartbeatChan len:", len(rf.heartbeatChan))
+	//log.Println("heartbeatChan len:", len(rf.heartbeatChan))
 	rf.heartbeatChan <- true // 目的了为了取消在follower状态下等待选举超时,但是当问题是在实现leader任务的时候，没有一个点触出发退出心跳
 
 	if args.Term < currentTerm {
 		// 过时的请求
-		log.Println("previous term:", args.Term, "currentTerm:", currentTerm)
+		//log.Println("previous term:", args.Term, "currentTerm:", currentTerm)
 		reply.VoteGranted = false
 	} else if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		log.Println("follower:", rf.me, "has votedFor:", rf.votedFor)
+		//log.Println("follower:", rf.me, "has votedFor:", rf.votedFor)
 		reply.VoteGranted = false
 	} else if rf.commitIndex != 0 && (args.LastLogIndex < rf.commitIndex || args.LastLogTerm < currentTerm) {
 		// rf.commitIndex == 0 表示还没有日志，则没必要检查
 		// 检查candidate的日志是不是比自己的日志新
-		log.Println("candidate:", args.CandidateId, "'slog is not at least as up-to-date as receiver’s log")
+		//log.Println("candidate:", args.CandidateId, "'slog is not at least as up-to-date as receiver’s log")
 		reply.VoteGranted = false
 	} else {
 
@@ -222,15 +222,24 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.VoteGranted = true
 	}
-	log.Println("deal RequestVote done, voteGranted:", reply.VoteGranted)
+	//log.Println("deal RequestVote done, voteGranted:", reply.VoteGranted)
 }
 
 func (rf *Raft)checkCommitIndexAndApplied() {
 	if rf.commitIndex > rf.lastApplied {
+		commitIndex := rf.commitIndex
+		lastApplied := rf.lastApplied
 		// TODO:需要应用到状态机
 		rf.mu.Lock()
 		rf.lastApplied = rf.commitIndex
 		rf.mu.Unlock()
+		for i:=lastApplied+1; i<=commitIndex;i++ {
+			applymsg := ApplyMsg{
+				Index:rf.log[i].Index,
+				Command:rf.log[i].Command,
+			}
+			rf.applyCh <- applymsg // 可能阻塞？
+		}
 	}
 }
 
@@ -283,11 +292,14 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	} else {
 
 		firstEntry := args.Entries[0]
-		if len(rf.log) > firstEntry.index {
+		//log.Println(args)
+		if len(rf.log) > firstEntry.Index {
 			// 3. If an existing entry conflicts with a new one (same index
 			// but different terms), delete the existing entry and all that
 			// follow it
-			rf.log = rf.log[:firstEntry.index - 1]
+			//log.Println("firstEntry.index:",firstEntry.Index)
+			// 此处发送过来了0，为什么呢？去看
+			rf.log = rf.log[:(firstEntry.Index - 1)]
 		}
 		rf.log = append(rf.log, args.Entries...)
 		reply.Success = true
@@ -355,18 +367,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	go func(command interface{}) {
 		// 异步执行
 		// 1)Leader将该请求记录到自己的日志之中;
-		log := Log{
+		entry := Log{
 			Term:rf.currentTerm,
 			Command:command,
-			index:len(rf.log),
+			Index:len(rf.log),
 		}
-		rf.log = append(rf.log, log)
+		rf.log = append(rf.log, entry)
 		// 2)Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
-		agree := rf.broadcastAppendEntries([]Log{log})
+		agree := rf.broadcastAppendEntries([]Log{entry})
 		// 3)Leader等待获取多数服务器的成功回应之后(如果总共5台,那么只要收到另外两台回应),
 		// 将该请求的命令应用到状态机(也就是提交),更新自己的 commitIndex 和 lastApplied 值;
 
-
+		//log.Println("leader:",rf.me,"broadcastAppendEntries and get:",agree)
 
 		if agree {
 			// TODO:应用到状态机
@@ -376,12 +388,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.nextIndex[rf.me] = len(rf.log)
 			rf.mu.Unlock()
 			applymsg := ApplyMsg{
-				Index:log.index,
-				Command:log.Command,
+				Index:entry.Index,
+				Command:entry.Command,
 			}
 			rf.applyCh <- applymsg // 可能阻塞？
 		} else {
-			// 失败了怎么办?不更新值，返回错误-1，-1，true
+			// TODO:失败了怎么办?
 		}
 		// 4)Leader在与Follower的下一个AppendEntries RPCs通讯中,
 		// 就会使用更新后的commitIndex,Follower使用该值更新自己的commitIndex;
@@ -390,22 +402,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	}(command)
 
-	index = rf.commitIndex
+	index = len(rf.log)
 	term = rf.currentTerm
 	return index, term, isLeader
 }
 
 // Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
 func (rf *Raft)broadcastAppendEntries(entries []Log) bool {
-	prevLog := rf.log[entries[0].index - 1]
+	prevLog := rf.log[entries[0].Index - 1]
 	args := AppendEntiesArgs{
 		Term:rf.currentTerm,
 		LeaderId:rf.me,
 		LeaderCommit:rf.commitIndex,
-		PrevLogIndex:prevLog.index,
+		PrevLogIndex:prevLog.Index,
 		PrevLogTerm:prevLog.Term,
 		Entries:entries,
 	}
+	//log.Println(args)
 	var successCnt int = 1
 	for i := range rf.peers {
 		if i != rf.me && rf.status == STATUS_LEADER {
@@ -525,10 +538,11 @@ func (rf *Raft)broadcastHeartbeat() {
 				LeaderId:rf.me,
 				LeaderCommit:rf.commitIndex,
 			}
+			// 判断log的最大index ≥ nextIndex,如果大于，需要发送从nextIndex开始的log
 			if lastLogIndex >= rf.nextIndex[i] {
 				args.Entries = rf.log[rf.nextIndex[i]:lastLogIndex]
 			}
-
+			//log.Println("rf.nextIndex[i]",rf.nextIndex[i])
 			reply := &AppendEntiesReply{}
 			//log.Println("leader:", args.LeaderId, "send heartbeat to follower:", i)
 			ok := rf.sendAppendEnties(i, args, reply)
@@ -538,6 +552,7 @@ func (rf *Raft)broadcastHeartbeat() {
 					rf.resetStateAndConvertToFollower(reply.Term)
 					break
 				}
+				//log.Println("sendAppendEnties reply success:",reply.Success)
 				if reply.Success {
 					//If successful: update nextIndex and matchIndex for follower
 					rf.nextIndex[i] = lastLogIndex + 1
@@ -638,13 +653,13 @@ func (rf *Raft) loop() {
 		switch rf.status {
 		case STATUS_FOLLOWER:
 			rf.resetElectionTimeout()
-			log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.randomizedElectionTimeout)
+			//log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.randomizedElectionTimeout)
 			// 等待心跳，如果心跳未到，但是选举超时了，则开始新一轮选举
 				select {
 				case <-rf.heartbeatChan:
 				case <-time.After(rf.randomizedElectionTimeout):
 				// 开始重新选举
-					log.Println("follower:", rf.me, "election timeout:", rf.randomizedElectionTimeout)
+				//	log.Println("follower:", rf.me, "election timeout:", rf.randomizedElectionTimeout)
 					if rf.status != STATUS_FOLLOWER {
 						// panic
 						log.Fatal("status not right when in follower and after randomizedElectionTimeout:", rf.randomizedElectionTimeout)
@@ -652,10 +667,10 @@ func (rf *Raft) loop() {
 					rf.convertToCandidate()
 				}
 		case STATUS_CANDIDATE:// 开始新选举
-			log.Println("now I begin to candidate,index:", rf.me)
+			//log.Println("now I begin to candidate,index:", rf.me)
 			rf.candidate()
 		case STATUS_LEADER:
-			log.Println("now I am the leader,index:", rf.me)
+			//log.Println("now I am the leader,index:", rf.me)
 			rf.leader()
 		}
 	}
@@ -687,7 +702,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.voteResultChan = make(chan bool)
 	rf.votedFor = -1
 	rf.currentTerm = 0
-	rf.log = []Log{{Term:rf.currentTerm, index:0}}
+	rf.log = []Log{{Term:rf.currentTerm, Index:0}}
 	rf.status = STATUS_FOLLOWER
 	rf.electionTimeout = 1000 * time.Millisecond // 1000ms
 	rf.heartbeatTimeout = 500 * time.Millisecond

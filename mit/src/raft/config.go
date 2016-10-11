@@ -37,7 +37,7 @@ type config struct {
 	connected []bool   // whether each server is on the net
 	saved     []*Persister
 	endnames  [][]string    // the port file names each sends to
-	logs      []map[int]int // copy of each server's committed entries
+	logs      []map[int]int // copy of each server's committed entries,每一项都是一个server已经commit的日志
 }
 
 func make_config(t *testing.T, n int, unreliable bool) *config {
@@ -144,6 +144,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
+			//log.Println("get ApplyMsg from server, index:",m.Index,"command:",m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
@@ -159,7 +160,7 @@ func (cfg *config) start1(i int) {
 				_, prevok := cfg.logs[i][m.Index-1]
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
-
+				//log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
@@ -327,6 +328,9 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
+		//if i==1 && index==1 {
+		//	log.Println(cmd1,ok)
+		//}
 
 		if ok {
 			if count > 0 && cmd != cmd1 {
@@ -403,11 +407,13 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 		}
 
 		if index != -1 {
+			//log.Println("命令:",cmd,"获取到的index:",index)
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//log.Println(nd,"个server认为command:",cmd1,"已经commited")
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
