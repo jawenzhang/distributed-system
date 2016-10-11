@@ -255,13 +255,13 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	currentTerm := rf.currentTerm
 	// 小于的都丢弃
 	if args.Term < currentTerm {
-		log.Println("LeaderId:", args.LeaderId, "has small term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
+		//log.Println("LeaderId:", args.LeaderId, "has small term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
 		reply.Success = false
 		return
 	}
 	// 立即转变为follower
 	if args.Term > currentTerm {
-		log.Println("LeaderId:", args.LeaderId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
+		//log.Println("LeaderId:", args.LeaderId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
 		rf.resetStateAndConvertToFollower(args.Term)
 	}
 
