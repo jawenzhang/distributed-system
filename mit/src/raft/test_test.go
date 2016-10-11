@@ -50,31 +50,31 @@ func TestReElection(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
-	fmt.Printf("leader故障，新的leader选出出来\n")
+	//fmt.Printf("leader故障，新的leader选出出来\n")
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
-	fmt.Printf("老的leader加入，不影响只有一个leader\n")
+	//fmt.Printf("老的leader加入，不影响只有一个leader\n")
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
-	fmt.Println("两个server故障",leader2,(leader2 + 1) % servers,"不会有新的leader")
+	//fmt.Println("两个server故障",leader2,(leader2 + 1) % servers,"不会有新的leader")
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
-	fmt.Println("恢复一个server",(leader2 + 1) % servers,"出现leader")
+	//fmt.Println("恢复一个server",(leader2 + 1) % servers,"出现leader")
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
-	fmt.Println("再次恢复一个server",leader2,"出现leader")
+	//fmt.Println("再次恢复一个server",leader2,"出现leader")
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 

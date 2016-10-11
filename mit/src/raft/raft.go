@@ -331,6 +331,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 就会使用更新后的commitIndex,Follower使用该值更新自己的commitIndex;
 	// 5)Follower发现自己的 commitIndex > lastApplied
 	// 则将日志commitIndex的条目应用到自己的状态机(这里就是Follower提交条目的时机)
+
+
+
 	return index, term, isLeader
 }
 
