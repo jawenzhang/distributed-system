@@ -13,7 +13,10 @@ import "fmt"
 import "time"
 import "math/rand"
 import "sync/atomic"
-import "sync"
+import (
+	"sync"
+	"log"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -118,15 +121,20 @@ func TestFailAgree(t *testing.T) {
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one failed server?
+	log.Println((leader + 1) % servers,"follow故障")
 	cfg.one(102, servers-1)
+	log.Println("命令",102,"agree")
 	cfg.one(103, servers-1)
+	log.Println("命令",103,"agree")
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(104, servers-1)
+	log.Println("命令",104,"agree")
 	cfg.one(105, servers-1)
+	log.Println("命令",105,"agree")
 
 	// failed server re-connected
 	cfg.connect((leader + 1) % servers)
-
+	log.Println((leader + 1) % servers,"follow恢复")
 	// agree with full set of servers?
 	cfg.one(106, servers)
 	time.Sleep(RaftElectionTimeout)

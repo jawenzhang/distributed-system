@@ -160,7 +160,9 @@ func (cfg *config) start1(i int) {
 				_, prevok := cfg.logs[i][m.Index-1]
 				cfg.logs[i][m.Index] = v
 				cfg.mu.Unlock()
-				//log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
+				//if m.Index == 1{
+				//	log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
+				//}
 				if m.Index > 1 && prevok == false {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
@@ -328,10 +330,9 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-		//if i==1 && index==1 {
-		//	log.Println(cmd1,ok)
+		//if index==1 {
+		//	log.Println(i,index,cmd1,ok)
 		//}
-
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n",
