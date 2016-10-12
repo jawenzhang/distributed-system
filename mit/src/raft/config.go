@@ -144,7 +144,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
-			//log.Println("get ApplyMsg from server, index:",m.Index,"command:",m.Command)
+			//log.Println("get ApplyMsg from server",i,"index:",m.Index,"command:",m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
@@ -330,6 +330,9 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
+
+		//log.Println(i,index,cmd1,ok)
+
 		//if index==1 {
 		//	log.Println(i,index,cmd1,ok)
 		//}
@@ -406,7 +409,6 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				}
 			}
 		}
-
 		if index != -1 {
 			//log.Println("命令:",cmd,"获取到的index:",index)
 			// somebody claimed to be the leader and to have
@@ -414,8 +416,8 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				//log.Println(nd,"个server认为command:",cmd1,"已经commited")
 				if nd > 0 && nd >= expectedServers {
+					//log.Println(nd,"个server认为command:",cmd1,"已经commited")
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
