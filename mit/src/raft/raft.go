@@ -87,7 +87,6 @@ type Raft struct {
 	heartbeatChan             chan bool
 	voteResultChan            chan bool     // 选举是否成功
 	votedCount                int           // 收到的投票数
-	applyCh                   chan ApplyMsg
 }
 
 type Log struct {
@@ -222,24 +221,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	//log.Println("deal RequestVote done, voteGranted:", reply.VoteGranted)
 }
 
-func (rf *Raft) checkCommitIndexAndApplied() {
-	if rf.commitIndex > rf.lastApplied {
-		commitIndex := rf.commitIndex
-		lastApplied := rf.lastApplied
-		// TODO:需要应用到状态机
-		rf.mu.Lock()
-		rf.lastApplied = commitIndex
-		rf.mu.Unlock()
-		for i := lastApplied + 1; i <= commitIndex; i++ {
-			applymsg := ApplyMsg{
-				Index:   rf.log[i].Index,
-				Command: rf.log[i].Command,
-			}
-			rf.applyCh <- applymsg // 可能阻塞？
-			//log.Println(applymsg.Index,applymsg.Command)
-		}
-	}
-}
 
 //
 // example RequestVote RPC handler.
@@ -277,10 +258,14 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	// 如果已经已经存在的日志条目和新的产生冲突（相同偏移量但是任期号不同），删除这一条和之后所有的
 	firstEntry := args.Entries[0]
 	//log.Println(args)
+
+	rf.mu.Lock()
 	if len(rf.log) > firstEntry.Index {
 		rf.log = rf.log[:(firstEntry.Index - 1)] // 有旧的,则直接删除
 	}
 	rf.log = append(rf.log, args.Entries...)
+	rf.mu.Unlock()
+
 	reply.Success = true
 	//log.Println("update commitIndex","args.LeaderCommit",args.LeaderCommit," rf.commitIndex", rf.commitIndex)
 	if args.LeaderCommit > rf.commitIndex {
@@ -347,6 +332,24 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+func (rf *Raft)updateCommitIndex() {
+	rf.mu.Lock()
+	newCommitIndex := rf.commitIndex
+	count := 0
+	for _,logIndex := range rf.nextIndex {
+		if logIndex-1 > newCommitIndex {
+			count++
+			if newCommitIndex == rf.commitIndex || newCommitIndex > logIndex-1 {
+				newCommitIndex = logIndex-1
+			}
+		}
+	}
+	if count > len(rf.peers)/2 && rf.status==STATUS_LEADER{
+		rf.commitIndex = newCommitIndex
+	}
+	rf.mu.Unlock()
+}
+
 func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *AppendEntiesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEnties", args, reply)
 
@@ -360,6 +363,8 @@ func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *Appen
 			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
 			rf.mu.Unlock()
+			// 在此处更新commitIndex
+			rf.updateCommitIndex()
 		} else {
 			// 不认同PrevLogIndex，重传
 			rf.mu.Lock()
@@ -398,51 +403,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 		return index, term, isLeader
 	}
-	rf.mu.Lock()
+
+
+
 	index = len(rf.log)
 	term = rf.currentTerm
-	// 1)Leader将该请求记录到自己的日志之中;
 	entry := Log{
 		Term:    term,
 		Command: command,
-		Index:   index,
+		Index:index,
 	}
+	rf.mu.Lock()
+	// 1)Leader将该请求记录到自己的日志之中;
 	rf.log = append(rf.log, entry)
+	rf.nextIndex[rf.me] = index+1
 	rf.mu.Unlock()
 
 	// 2)Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
-	agree := rf.broadcastAppendEntries([]Log{entry})
-	// 3)Leader等待获取多数服务器的成功回应之后(如果总共5台,那么只要收到另外两台回应),
-	// 将该请求的命令应用到状态机(也就是提交),更新自己的 commitIndex 和 lastApplied 值;
-
-	//log.Println("leader:",rf.me,"broadcastAppendEntries and get:",agree)
-
-	if agree {
-		// TODO:应用到状态机
-		rf.mu.Lock()
-		rf.commitIndex++
-		rf.lastApplied = rf.commitIndex
-		rf.nextIndex[rf.me] = len(rf.log)
-		rf.mu.Unlock()
-		applymsg := ApplyMsg{
-			Index:   entry.Index,
-			Command: entry.Command,
-		}
-		rf.applyCh <- applymsg // 可能阻塞？
-	} else {
-		// TODO:失败了怎么办?
-	}
-
-	// 客户端的一次日志请求操作触发
-	//go func(command interface{}) {
-	// 异步执行，这些都放入异步是有问题的
-
-	// 4)Leader在与Follower的下一个AppendEntries RPCs通讯中,
-	// 就会使用更新后的commitIndex,Follower使用该值更新自己的commitIndex;
-	// 5)Follower发现自己的 commitIndex > lastApplied
-	// 则将日志commitIndex的条目应用到自己的状态机(这里就是Follower提交条目的时机)
-	//log.Println("leader:",rf.me,"wait next heartbeat to send log to follower")
-	//}(command)
+	go rf.broadcastAppendEntriesRPC() // 那在哪儿执行应用到状态机的操作呢？在stateMachine中
 
 	return index, term, isLeader
 }
@@ -464,48 +442,6 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 	}
 }
 
-// Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
-func (rf *Raft) broadcastAppendEntries(entries []Log) bool {
-	prevLog := rf.log[entries[0].Index - 1]
-	args := AppendEntiesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		LeaderCommit: rf.commitIndex,
-		PrevLogIndex: prevLog.Index,
-		PrevLogTerm:  prevLog.Term,
-		Entries:      entries,
-	}
-	//log.Println(args)
-	var successCnt int = 1
-	for i := range rf.peers {
-		if i != rf.me && rf.status == STATUS_LEADER {
-			// 日志的流向是  leader -> follower
-			reply := &AppendEntiesReply{}
-			// TODO:优化请求为并发
-			ok := rf.sendAppendEnties(i, args, reply)
-			if ok {
-				// 判断任期是否大于自己，如果大于则转换为follower,退出循环
-				if reply.Term > rf.currentTerm {
-					rf.resetStateAndConvertToFollower(reply.Term)
-					break
-				}
-				if reply.Success {
-					successCnt++
-				} else {
-					//TODO:接着发送小的index，直到匹配上
-				}
-			} else {
-				// 发送失败怎么办？
-			}
-		}
-	}
-	if successCnt > len(rf.peers) / 2 {
-		// 大多数都收到
-		return true
-	} else {
-		return false
-	}
-}
 
 //
 // the tester calls Kill() when a Raft instance won't
@@ -709,6 +645,34 @@ func (rf *Raft) loop() {
 	}
 }
 
+
+func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
+	// 在此运用已经agree的日志到状态机
+	for {
+		if rf.status == STATUS_LEADER {
+			// 需要去更新commitIndex,原则是根据 nextIndex来判断是否超过半数 follower已经收到了日志了
+		}
+		// 如果commitIndex > lastApplied，那么就 lastApplied 加一，并把log[lastApplied]应用到状态机中
+		if rf.commitIndex > rf.lastApplied {
+			go func() {
+				// 应用到状态机
+				rf.mu.Lock()
+				commitIndex := rf.commitIndex
+				lastApplied := rf.lastApplied
+				rf.lastApplied = commitIndex
+				rf.mu.Unlock()
+				for i := lastApplied + 1; i <= commitIndex; i++ {
+					applymsg := ApplyMsg{
+						Index:   rf.log[i].Index,
+						Command: rf.log[i].Command,
+					}
+					applyCh <- applymsg
+				}
+			}()
+		}
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -729,7 +693,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.applyCh = applyCh
+
 
 	rf.heartbeatChan = make(chan bool)
 	rf.voteResultChan = make(chan bool)
@@ -750,6 +714,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.loop()
+	go rf.stateMachine(applyCh)
 
 	return rf
 }
