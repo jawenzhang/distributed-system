@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"time"
 	//"fmt"
+	"fmt"
 )
 
 // import "bytes"
@@ -49,6 +50,20 @@ const (
 	STATUS_CANDIDATE
 	STATUS_LEADER
 )
+
+func convertStatusToString(status RaftStatus) string{
+	switch status {
+	case STATUS_FOLLOWER:
+		return "follower"
+	case STATUS_CANDIDATE:
+		return "candidate"
+	case STATUS_LEADER:
+		return "leader"
+	default:
+		return "unknow"
+	}
+}
+
 
 //
 // A Go object implementing a single Raft peer.
@@ -181,6 +196,17 @@ func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool{
 	return rlastTerm > lastLog.Term || (rlastTerm == lastLog.Term && rlastIndex >= lastLog.Index )
 }
 
+
+
+func (rf *Raft)Detail() string{
+	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n",rf.me,rf.currentTerm,convertStatusToString(rf.status))
+	detail += fmt.Sprintf("commitIndex:%d,lastApplied:%d\n",rf.commitIndex,rf.lastApplied)
+	detail += fmt.Sprintf("log is:%v\n",rf.log)
+	detail += fmt.Sprintf("nextIndex is:%v\n",rf.nextIndex)
+	detail += fmt.Sprintf("matchIndex is:%v\n",rf.matchIndex)
+	return detail
+}
+
 //
 // 如果收到一个大于自己任期的投票请求，怎么处理？需要将自己的votedFor更新嘛？
 // 原则：If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
@@ -266,19 +292,24 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	//	return
 	//}
 	// 如果已经已经存在的日志条目和新的产生冲突（相同偏移量但是任期号不同），删除这一条和之后所有的
-	reply.Success = true
-	if len(args.Entries) > 0 { // 当len(args.Entries) = 0 的时候，是心跳或者是确认leaderCommit的命令有两种情况
-		firstEntry := args.Entries[0]
+	//if len(args.Entries) > 0 { // 当len(args.Entries) = 0 的时候，是心跳或者是确认leaderCommit的命令有两种情况
+		//firstEntry := args.Entries[0]
 		//log.Println(args)
 
 		rf.mu.Lock()
-		if len(rf.log) > firstEntry.Index {
-			rf.log = rf.log[:(firstEntry.Index - 1)] // 有旧的,则直接删除
+		// PrevLogIndex 之前都是可靠的，之后的都是不可靠的
+		if len(rf.log) >= args.PrevLogIndex+1 {
+			//log.Println("server",rf.me,"len(rf.log)",len(rf.log),"args.PrevLogIndex",args.PrevLogIndex)
+			rf.log = rf.log[:args.PrevLogIndex+1]// 一直取到rf.log[args.PrevLogIndex]的值
+			rf.log = append(rf.log, args.Entries...)
+			reply.Success = true
+		}else {
+			// 本地的日志没有远端的多，不存在args.PrevLogIndex的日志
+			reply.Success = false
 		}
-		rf.log = append(rf.log, args.Entries...)
 		rf.mu.Unlock()
 		//log.Println("update commitIndex","args.LeaderCommit",args.LeaderCommit," rf.commitIndex", rf.commitIndex)
-	}
+	//}
 	if args.LeaderCommit > rf.commitIndex {
 		// 如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
 		// 更新自身的commitIndex，但是在哪去更新lastApplied呢？在follower中需要一个单独的 goroutine ，去更新lastApplied
@@ -609,7 +640,9 @@ func (rf *Raft) candidate() {
 	select {
 	case <-rf.voteResultChan:
 	case <-rf.heartbeatChan:
-		return // 退出选举
+		// 退出选举,转变为follower
+		rf.convertToFollower()
+		return
 	default:
 	}
 
@@ -617,7 +650,7 @@ func (rf *Raft) candidate() {
 	rf.resetCandidateState()
 	// 第二步开始广播投票
 	//log.Println(fmt.Sprintf("candidate:%d begin to broadcastRequestVoteRPC",rf.me))
-	rf.broadcastRequestVoteRPC()
+	go rf.broadcastRequestVoteRPC()
 
 	// 第三步等待结果
 	// 保持candidate状态，直到下面3种情况发生
@@ -635,7 +668,8 @@ func (rf *Raft) candidate() {
 	case <-time.After(rf.resetElectionTimeout()):
 	// 开始新的选举
 	case <-rf.heartbeatChan:
-	// 收到别的服务器已经转变为leader的通知，退出
+	// 收到别的服务器已经转变为leader的通知，退出选举,转变为follower
+		rf.convertToFollower()
 	}
 }
 
@@ -645,7 +679,7 @@ func (rf *Raft)follower() {
 	//log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.randomizedElectionTimeout)
 	// 等待心跳，如果心跳未到，但是选举超时了，则开始新一轮选举
 	select {
-	case <-rf.heartbeatChan:
+	case <-rf.heartbeatChan: // 收到appendEntries就是一个heartbeatChan
 	case <-time.After(rf.randomizedElectionTimeout):
 	//  开始重新选举
 	//	log.Println("follower:", rf.me, "election timeout:", rf.randomizedElectionTimeout)

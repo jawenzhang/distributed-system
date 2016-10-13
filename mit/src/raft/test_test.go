@@ -157,10 +157,13 @@ func TestFailNoAgree(t *testing.T) {
 
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
+
+	//log.Println("leader is",leader)
+
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
-
+	// 此处返回的index肯定是2
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
@@ -176,6 +179,12 @@ func TestFailNoAgree(t *testing.T) {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
+	// 此时每个server的数据是什么样子的呢？打印出来
+	//for _,raft := range cfg.rafts {
+	//	log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
+	//}
+
+	//log.Println("恢复3个server")
 	// repair failures
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
@@ -185,10 +194,19 @@ func TestFailNoAgree(t *testing.T) {
 	// among their own ranks, forgetting index 2.
 	// or perhaps
 	leader2 := cfg.checkOneLeader()
+
+	//log.Println("重新选举后leader is",leader2)
+	// 此时每个server的数据是什么样子的呢？打印出来
+	//for _,raft := range cfg.rafts {
+	//	log.Println(raft.Detail()) // 理论上应该是日志都是同步到[{0 <nil> 0} {2 10 1}]
+	//}
+
+
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
+	//log.Println("新的leader:",leader2,"提交命令后得到的index是:",index2)
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
