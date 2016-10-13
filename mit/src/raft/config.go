@@ -164,7 +164,7 @@ func (cfg *config) start1(i int) {
 				//	log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
 				//}
 				if m.Index > 1 && prevok == false {
-					log.Println(cfg.rafts[i].Detail())
+					//log.Println(cfg.rafts[i].Detail())
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {

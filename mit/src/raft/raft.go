@@ -25,6 +25,8 @@ import (
 	"time"
 	//"fmt"
 	"fmt"
+	"bytes"
+	"encoding/gob"
 )
 
 // import "bytes"
@@ -137,6 +139,16 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm) // 当前任期
+	e.Encode(rf.log) // 收到的日志
+	e.Encode(rf.votedFor) // 投票的
+	e.Encode(rf.commitIndex) // 已经确认的一致性日志，之后的日志表示还没有确认是否可以同步，一旦确认的日志都不会改变了
+	//e.Encode(rf.lastApplied)
+	//e.Encode(rf.nextIndex)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -149,6 +161,14 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.log)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.commitIndex)
+	//d.Decode(&rf.lastApplied)
+	//d.Decode(&rf.nextIndex)
 }
 
 //
@@ -226,7 +246,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	// 如果candidate的任期小，并且日志也没有自己的多，则拒绝
-	if args.Term <  rf.currentTerm && len(rf.log) >= args.LastLogIndex + 1 {
+	if args.Term < rf.currentTerm && len(rf.log) >= args.LastLogIndex + 1 {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -237,12 +257,13 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		return
 	}
-	if args.Term >  rf.currentTerm {
+	if args.Term > rf.currentTerm {
 		// 转变为follower
 		rf.resetStateAndConvertToFollower(args.Term)
 	}
 
-	if rf.reqMoreUpToDate(&args) { // candidate的日志更新，投票给他
+	if rf.reqMoreUpToDate(&args) {
+		// candidate的日志更新，投票给他
 		rf.mu.Lock()
 		rf.votedFor = args.CandidateId
 		rf.status = STATUS_FOLLOWER
@@ -250,7 +271,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		return
-	}else {
+	} else {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -268,13 +289,15 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	rf.heartbeatChan <- true
 
 	// 如果 term < currentTerm 就返回 false
-	if args.Term < rf.currentTerm && args.LeaderCommit <= rf.commitIndex {// leader没有自己的任期高，并且leader提交的日志也没有自己的新
+	if args.Term < rf.currentTerm && args.LeaderCommit <= rf.commitIndex {
+		// leader没有自己的任期高，并且leader提交的日志也没有自己的新
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		//log.Println("LeaderId:", args.LeaderId, "has small term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
 		return
 	}
-	if args.Term > rf.currentTerm { // 更新自己的任期
+	if args.Term > rf.currentTerm {
+		// 更新自己的任期
 		rf.currentTerm = args.Term
 		log.Println("LeaderId:", args.LeaderId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", rf.currentTerm)
 		//rf.resetStateAndConvertToFollower(args.Term)
@@ -306,7 +329,6 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 		//}
 		//rf.log = rf.log[:args.PrevLogIndex + 1]// 一直取到rf.log[args.PrevLogIndex]的值
 		//rf.log = append(rf.log, args.Entries...)
-
 		//newlog := rf.log[:args.PrevLogIndex + 1]// 一直取到rf.log[args.PrevLogIndex]的值
 		//newlog = append(newlog, args.Entries...)
 		//
@@ -328,24 +350,27 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 			} else {
 				rf.commitIndex = args.LeaderCommit
 			}
-			if len(rf.log) < rf.commitIndex + 1{
-				log.Fatal("rf short",rf.Detail())
+			if len(rf.log) < rf.commitIndex + 1 {
+				log.Fatal("rf short", rf.Detail())
 			}
 			//if rf.commitIndex+1 > len(rf.log){
 			//	log.Println(rf.Detail())
 			//}
 			//log.Println("after update,me",rf.me,"commit",rf.commitIndex)
 			//go rf.checkCommitIndexAndApplied()
-		} else  {
+		} else {
 			//log.Println(rf.Detail())
 			//log.Println(args)
 			//log.Fatal("args.LeaderCommit < rf.commitIndex ", args.LeaderCommit, rf.commitIndex)
 		}
 		rf.mu.Unlock()
+		// 日志发生改变
+		go rf.persist()
 		reply.Success = true
-	}else {
+	} else {
 		reply.Success = false
 	}
+
 }
 
 func (rf *Raft)incVoteCount() {
@@ -418,6 +443,8 @@ func (rf *Raft)updateCommitIndex() {
 	//	log.Fatal("update!! ",rf.Detail())
 	//}
 	rf.mu.Unlock()
+	// commitIndex和log发生改变了
+	go rf.persist()
 	//log.Println("leader",rf.me,"commitIndex",rf.commitIndex)
 }
 
@@ -506,7 +533,7 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 			// ！！！由于此处使用goroutine,有可能后面的请求先到server，即大的rf.commitIndex先到，反而前面的请求后到，需要在处理端处理
 			go func(i int) {
 				prevLogIndex := rf.nextIndex[i] - 1
-				if prevLogIndex < 0 || prevLogIndex+1 > len(rf.log) {
+				if prevLogIndex < 0 || prevLogIndex + 1 > len(rf.log) {
 					log.Fatal(rf.Detail())
 				}
 				//log.Println(prevLogIndex,rf.nextIndex)
@@ -745,25 +772,25 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 		time.Sleep(50 * time.Millisecond)
 		// 如果commitIndex > lastApplied，那么就 lastApplied 加一，并把log[lastApplied]应用到状态机中
 		if rf.commitIndex > rf.lastApplied {
-				//log.Println("server",rf.me,"is",rf.status,"(commitIndex,lastApplied)",rf.commitIndex,rf.lastApplied)
-				// 应用到状态机
-				rf.mu.Lock()
-				if len(rf.log) < rf.commitIndex + 1 {
-					// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
-					// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
-					log.Fatal("machine!! ",rf.Detail())
+			//log.Println("server",rf.me,"is",rf.status,"(commitIndex,lastApplied)",rf.commitIndex,rf.lastApplied)
+			// 应用到状态机
+			rf.mu.Lock()
+			if len(rf.log) < rf.commitIndex + 1 {
+				// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
+				// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
+				log.Fatal("machine!! ", rf.Detail())
+			}
+			commitIndex := rf.commitIndex
+			lastApplied := rf.lastApplied
+			rf.lastApplied = commitIndex
+			rf.mu.Unlock()
+			for i := lastApplied + 1; i <= commitIndex; i++ {
+				applymsg := ApplyMsg{
+					Index:   rf.log[i].Index,
+					Command: rf.log[i].Command,
 				}
-				commitIndex := rf.commitIndex
-				lastApplied := rf.lastApplied
-				rf.lastApplied = commitIndex
-				rf.mu.Unlock()
-				for i := lastApplied + 1; i <= commitIndex; i++ {
-					applymsg := ApplyMsg{
-						Index:   rf.log[i].Index,
-						Command: rf.log[i].Command,
-					}
-					applyCh <- applymsg // 此处可能阻塞
-				}
+				applyCh <- applymsg // 此处可能阻塞
+			}
 		}
 	}
 }
@@ -806,6 +833,10 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	for i :=0; i < cnt; i++ {
+		rf.nextIndex[i] = len(rf.log)
+	}
 
 	go rf.loop()
 	go rf.stateMachine(applyCh)
