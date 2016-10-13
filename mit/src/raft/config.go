@@ -164,7 +164,7 @@ func (cfg *config) start1(i int) {
 				//	log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
 				//}
 				if m.Index > 1 && prevok == false {
-					log.Println(cfg.logs[i])
+					log.Println(cfg.rafts[i].Detail())
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
@@ -374,6 +374,10 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	}
 	nd, cmd := cfg.nCommitted(index)
 	if nd < n {
+		// 此时每个server的数据是什么样子的呢？打印出来
+		for _,raft := range cfg.rafts {
+			log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
+		}
 		cfg.t.Fatalf("only %d decided for index %d; wanted %d\n",
 			nd, index, n)
 	}
