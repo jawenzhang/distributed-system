@@ -422,19 +422,23 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 }
 
 func (rf *Raft)updateCommitIndex() {
+	// 如果存在一个N满足N>commitIndex,多数的matchIndex[i] >= N,并且 log[N].term == currentTerm:设置commitIndex = N
 	rf.mu.Lock()
+	// 找出 matchIndex（已经同步给各个follower的值）
 	newCommitIndex := rf.commitIndex
 	count := 0
-	for _, logIndex := range rf.nextIndex {
-		if logIndex - 1 > rf.commitIndex {
+	for _, nextIndex := range rf.nextIndex {
+		if nextIndex-1 > rf.commitIndex {
 			count++
-			if newCommitIndex == rf.commitIndex || newCommitIndex > logIndex - 1 {
-				newCommitIndex = logIndex - 1
+			if newCommitIndex == rf.commitIndex || newCommitIndex > nextIndex-1 {
+				newCommitIndex = nextIndex-1
 			}
 		}
 	}
 	//log.Println(count)
-	if count > len(rf.peers) / 2 && rf.status == STATUS_LEADER {
+	if count > len(rf.peers) / 2 && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
+		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
+		// 原因参见5.4.2
 		rf.commitIndex = newCommitIndex
 	}
 	//if len(rf.log) < rf.commitIndex + 1 {

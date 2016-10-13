@@ -152,6 +152,12 @@ func (cfg *config) start1(i int) {
 				cfg.mu.Lock()
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.Index]; oldok && old != v {
+						// 此时每个server的数据是什么样子的呢？打印出来
+						for _,raft := range cfg.rafts {
+							if raft != nil{
+								log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
+							}
+						}
 						// some server has already committed a different value for this entry!
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 							m.Index, i, m.Command, j, old)

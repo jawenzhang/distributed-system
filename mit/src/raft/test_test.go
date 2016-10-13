@@ -681,6 +681,7 @@ func TestFigure8(t *testing.T) {
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
+		// 获取到leader，并且提交了一个值
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
 				_, _, ok := cfg.rafts[i].Start(rand.Int())
@@ -689,7 +690,7 @@ func TestFigure8(t *testing.T) {
 				}
 			}
 		}
-
+		// 随机sleep
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
@@ -697,12 +698,12 @@ func TestFigure8(t *testing.T) {
 			ms := (rand.Int63() % 13)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
-
+		// 如果有leader，模拟leader挂了
 		if leader != -1 {
 			cfg.crash1(leader)
 			nup -= 1
 		}
-
+		// 如果好的机器小于3台了，尝试恢复
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
@@ -712,7 +713,7 @@ func TestFigure8(t *testing.T) {
 			}
 		}
 	}
-
+	// 都启动
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i)
