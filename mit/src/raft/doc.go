@@ -15,7 +15,7 @@ package raft
 // 3. 向所有的服务器发送 RequestVote RPC请求
 // 如果获取服务器中多数投票:转换成Leader
 // 如果收到从新Leader发送的AppendEnties RPC请求:转换成follower
-// 如果选举超时时间达到:开始 次新的选举
+// 如果选举超时时间达到:开始一次新的选举
 
 // rules for Leaders
 // 给每个服务器发送初始空的AppendEntires RPCs(heartbeat);指定空闲时间之 后重复该操作以防 election timeouts

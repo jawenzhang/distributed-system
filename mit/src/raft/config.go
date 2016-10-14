@@ -144,7 +144,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
-			log.Println("get ApplyMsg from server",i,"index:",m.Index,"command:",m.Command)
+			//log.Println("get ApplyMsg from server",i,"index:",m.Index,"command:",m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
@@ -170,7 +170,9 @@ func (cfg *config) start1(i int) {
 				//	log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
 				//}
 				if m.Index > 1 && prevok == false {
-					//log.Println(cfg.rafts[i].Detail())
+					for i:=0;i<cfg.n;i++ {
+						log.Println(cfg.rafts[i].Detail())
+					}
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
@@ -292,6 +294,9 @@ func (cfg *config) checkOneLeader() int {
 		if len(leaders) != 0 {
 			return leaders[lastTermWithLeader][0]
 		}
+	}
+	for i:=0;i<cfg.n;i++ {
+		log.Println(cfg.rafts[i].Detail())
 	}
 	cfg.t.Fatalf("expected one leader, got none")
 	return -1
@@ -441,6 +446,12 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	cfg.printDetail()
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
+}
+func (cfg *config)printDetail() {
+	for i:=0;i<cfg.n;i++ {
+		log.Println(cfg.rafts[i].Detail())
+	}
 }

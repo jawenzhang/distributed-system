@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"bytes"
 	"encoding/gob"
-	"math"
+	"reflect"
 )
 
 // import "bytes"
@@ -204,6 +204,7 @@ type    AppendEntiesArgs struct {
 type AppendEntiesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	NextIndex int // 为了加快寻找，直接返回下一个需要传递的日志下标
 }
 
 func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool {
@@ -214,7 +215,11 @@ func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool {
 	rlastTerm := args.LastLogTerm
 	rlastIndex := args.LastLogIndex
 	//log.Println(lastLog,rlastIndex,rlastIndex)
-	return rlastTerm > lastLog.Term || (rlastTerm == lastLog.Term && rlastIndex >= lastLog.Index )
+	if rlastTerm != lastLog.Term {
+		return rlastTerm >= lastLog.Term
+	}else {
+		return rlastIndex >= lastLog.Index
+	}
 }
 
 func (rf *Raft)Detail() string {
@@ -263,7 +268,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	//log.Println("follower:",rf.me,"deal RequestVote done, voteGranted:", reply.VoteGranted)
 }
 
-
+func min(x, y int) int {
+	if x < y {
+		return x
+	}
+	return y
+}
 //
 func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	if args.Term < rf.currentTerm {
@@ -271,6 +281,11 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 		reply.Success = false
 		return
 	}
+	// 本身自己是leader，有可能收到别人的请求吗，实验中是可能的,会收到的一个大的term
+	//if rf.status == STATUS_LEADER {
+	//	log.Println("I am leader, but get AppendEnties",rf.Detail())
+	//	log.Println("args.term",args.Term,"currentTerm",rf.currentTerm)
+	//}
 	// 心跳一定来自leader
 	rf.heartbeatChan <- true
 
@@ -285,24 +300,31 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 			if args.PrevLogIndex+1+i < len(rf.log){
 				if rf.log[args.PrevLogIndex+1+i] != args.Entries[i]{
 					// index相同，但是纪元不同
-					rf.log = rf.log[:args.PrevLogIndex+1+i]// 之前的还是相同的
+					rf.log = rf.log[:args.PrevLogIndex+1+i]// 之前的还是相同的，再加上本条之后的
+					rf.log = append(rf.log,args.Entries[i:]...)
+					break
 				}
 			}else {
 				// 本条目不存在
-				rf.log = append(rf.log,args.Entries[i])
+				rf.log = append(rf.log,args.Entries[i:]...)
+				break
 			}
 		}
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = int(math.Min(float64(args.LeaderCommit),float64(len(rf.log)-1)))
+			rf.commitIndex = min(args.LeaderCommit,len(rf.log)-1)
 		}
+		// !!为了查明为什么日志错了
+		rf.checkLog(args)
 		//在回复给RPCs之前需要更新到持久化存储之上
 		rf.persist()
 		reply.Term = rf.currentTerm
 		reply.Success = true
+		reply.NextIndex = len(rf.log)
 		return
 	}else {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		reply.NextIndex = min(rf.commitIndex+1,args.PrevLogIndex-1)//
 		return
 	}
 
@@ -343,14 +365,12 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	if ok {
 		// 发送正常
-		if reply.VoteGranted && reply.Term == rf.currentTerm {
-			// 满足同一任期
-			// 投票了
-			rf.incVoteCount()
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.rpcRuleForAllServer(reply.Term)
+		if reply.VoteGranted {
+			rf.votedCount++
 			rf.judgeCandidateResult()
-		} else if reply.Term > rf.currentTerm {
-			// 转换为follower
-			rf.resetStateAndConvertToFollower(reply.Term)
 		}
 	}
 	return ok
@@ -377,13 +397,6 @@ func (rf *Raft)updateCommitIndex() {
 		rf.commitIndex = newCommitIndex
 		rf.persist()
 	}
-	//if len(rf.log) < rf.commitIndex + 1 {
-	//	// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
-	//	// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
-	//	log.Fatal("update!! ",rf.Detail())
-	//}
-	// commitIndex和log发生改变了
-	//log.Println("leader",rf.me,"commitIndex",rf.commitIndex)
 }
 
 func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *AppendEntiesReply) bool {
@@ -398,20 +411,26 @@ func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *Appen
 			// 更新nextInt和matchIndex
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+
+			//rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+			//rf.matchIndex[server] = rf.nextIndex[server] - 1
+			if reply.NextIndex > 0 {
+				rf.nextIndex[server] = reply.NextIndex
+			}
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
 			if rf.nextIndex[server] < 1 {
-				log.Fatal(rf.Detail())
+				log.Fatal("rf.nextIndex[server]<1",rf.Detail())
 			}
-			// 在此处更新commitIndex
-			//log.Println(rf.nextIndex)
 			rf.updateCommitIndex()
-
 		} else {
 			// 不认同PrevLogIndex，重传
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
+			rf.nextIndex[server] = reply.NextIndex
+			if reply.NextIndex > len(rf.log){
+				log.Fatal("get big NextIndex from",server,"args",args,"reply",reply)
 			}
+			//if rf.nextIndex[server] > 1 {
+			//	rf.nextIndex[server]--
+			//}
 		}
 	}
 
@@ -457,6 +476,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 1)Leader将该请求记录到自己的日志之中;
 	rf.log = append(rf.log, entry)
 	rf.nextIndex[rf.me] = index + 1
+	rf.matchIndex[rf.me] = index
 	rf.mu.Unlock()
 
 	// 2)Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
@@ -471,15 +491,11 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 		if i != rf.me && rf.status == STATUS_LEADER {
 			// ！！！由于此处使用goroutine,有可能后面的请求先到server，即大的rf.commitIndex先到，反而前面的请求后到，需要在处理端处理
 			go func(i int) {
-				if rf.status != STATUS_LEADER {
-					return
-				}
 				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[i] - 1
 				if prevLogIndex < 0 || prevLogIndex + 1 > len(rf.log) {
-					log.Fatal(rf.Detail())
+					log.Fatal("prevLogIndex < 0  || prevLogIndex + 1 > len(rf.log)",rf.Detail())
 				}
-				//log.Println(prevLogIndex,rf.nextIndex)
 				args := AppendEntiesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
@@ -488,12 +504,8 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 					PrevLogTerm:rf.log[prevLogIndex].Term,
 					Entries:rf.log[prevLogIndex + 1:], // 如果没有新日志，自然而然是空
 				}
-				reply := &AppendEntiesReply{}
-				//if len(args.Entries) > 0 {
-				//log.Println(fmt.Sprintf("leader:%d send LeaderCommit:%d,PrevLogIndex:%d,PrevLogTerm:%d to follower:%d",
-				//				args.LeaderId,args.LeaderCommit,args.PrevLogIndex,args.PrevLogTerm,i))
-				//}
 				rf.mu.Unlock()
+				reply := &AppendEntiesReply{}
 				rf.sendAppendEnties(i, args, reply)
 			}(i)
 		}
@@ -531,12 +543,12 @@ func (rf *Raft) convertToCandidate() {
 func (rf *Raft)convertToLeaderAndInitState() {
 	rf.mu.Lock()
 	rf.status = STATUS_LEADER
-	rf.mu.Unlock()
 	maxIndex := len(rf.log)
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = maxIndex
 		rf.matchIndex[i] = 0
 	}
+	rf.mu.Unlock()
 	//log.Println(rf.nextIndex)
 }
 
@@ -557,6 +569,8 @@ func (rf *Raft) resetStateAndConvertToFollower(term int) {
 // 广播投票信息
 func (rf *Raft) broadcastRequestVoteRPC() {
 	// 启动goroutine开始
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
@@ -565,12 +579,14 @@ func (rf *Raft) broadcastRequestVoteRPC() {
 	}
 	for i := range rf.peers {
 		if i != rf.me && rf.status == STATUS_CANDIDATE {
-			go func(index int) {
+			go func(index int, args RequestVoteArgs) {
+				if rf.status != STATUS_CANDIDATE {
+					return
+				}
 				reply := &RequestVoteReply{}
 				//log.Println(fmt.Sprintf("candidate:%d sendRequestVote to %d",rf.me,index))
 				rf.sendRequestVote(index, args, reply)
-				// TODO：deal sendRequestVote error
-			}(i)
+			}(i,args)
 		}
 	}
 }
@@ -644,8 +660,8 @@ func (rf *Raft) candidate() {
 	select {
 	case <-rf.voteResultChan:
 	case <-rf.heartbeatChan:
-	// 退出选举,转变为follower
-		rf.convertToFollower()
+		// 退出选举,转变为follower
+		rf.status = STATUS_FOLLOWER
 		return
 	default:
 	}
@@ -673,7 +689,7 @@ func (rf *Raft) candidate() {
 	// 开始新的选举
 	case <-rf.heartbeatChan:
 	// 收到别的服务器已经转变为leader的通知，退出选举,转变为follower
-		rf.convertToFollower()
+		rf.status = STATUS_FOLLOWER
 	}
 }
 
@@ -690,7 +706,7 @@ func (rf *Raft)follower() {
 		if rf.status != STATUS_FOLLOWER {
 			log.Fatal("status not right when in follower and after randomizedElectionTimeout:", rf.randomizedElectionTimeout)
 		}
-		rf.convertToCandidate()
+		rf.status = STATUS_CANDIDATE
 	}
 }
 
@@ -708,17 +724,18 @@ func (rf *Raft) loop() {
 		}
 	}
 }
-
+// 此处好的方法是stateMachine和其他通过channel通道
 func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 	// 在此运用已经agree的日志到状态机
 	for {
 		// ！！！！此处必须要有一个sleep，不然相当于此goroutine一直占有cpu，不会放弃
 		time.Sleep(50 * time.Millisecond)
 		// 如果commitIndex > lastApplied，那么就 lastApplied 加一，并把log[lastApplied]应用到状态机中
+
 		if rf.commitIndex > rf.lastApplied {
 			//log.Println("server",rf.me,"is",rf.status,"(commitIndex,lastApplied)",rf.commitIndex,rf.lastApplied)
 			// 应用到状态机
-			rf.mu.Lock()
+
 			if len(rf.log) < rf.commitIndex + 1 {
 				// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
 				// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
@@ -727,7 +744,7 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 			commitIndex := rf.commitIndex
 			lastApplied := rf.lastApplied
 			rf.lastApplied = commitIndex
-			rf.mu.Unlock()
+
 			for i := lastApplied + 1; i <= commitIndex; i++ {
 				applymsg := ApplyMsg{
 					Index:   rf.log[i].Index,
@@ -778,6 +795,8 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// check index
+	rf.checkLog(1)
 
 	for i :=0; i < cnt; i++ {
 		rf.nextIndex[i] = len(rf.log)
@@ -788,3 +807,13 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	return rf
 }
+
+func (rf *Raft)checkLog(v interface{}) {
+	for i:=0;i<len(rf.log);i++ {
+		if i != rf.log[i].Index {
+			log.Println("check log type:",reflect.TypeOf(v).String(),"value:",v)
+			log.Fatal("error log index",rf.Detail())
+		}
+	}
+}
+
