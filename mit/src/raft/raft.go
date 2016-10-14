@@ -178,7 +178,7 @@ type RequestVoteArgs struct {
 					 // Your data here.
 	Term         int // candidate的任期
 	CandidateId  int // candidate的id
-	LastLogIndex int
+	LastLogIndex int // 候选者最后日志条目的的索引
 	LastLogTerm  int // 和lastLogIndex保证至少有一个follower和自己一样持有最新的日志
 }
 
@@ -225,11 +225,11 @@ func (rf *Raft)Detail() string {
 	return detail
 }
 
-//
-// 如果收到一个大于自己任期的投票请求，怎么处理？需要将自己的votedFor更新嘛？
-// 原则：If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
-// 如果收到的请求或者响应中，包含的term大于当前的currentTerm，设置currentTerm=term，然后变为follower
+
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	// Receiver implementation
+	// 如果term < currentTerm 则返回false
+    // 如果本地的voteFor为空或者为candidateId,并且候选者的日志至少与接受者的日志一样新,则投给其选票
 
 	// 对于是否投票需要考虑:
 	// 1. candidate's term 足够新
@@ -436,9 +436,10 @@ func (rf *Raft)updateCommitIndex() {
 		}
 	}
 	//log.Println(count)
-	if count > len(rf.peers) / 2 && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
+	if (count > len(rf.peers) / 2) && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
+		log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
 		rf.commitIndex = newCommitIndex
 	}
 	//if len(rf.log) < rf.commitIndex + 1 {
@@ -448,7 +449,7 @@ func (rf *Raft)updateCommitIndex() {
 	//}
 	rf.mu.Unlock()
 	// commitIndex和log发生改变了
-	go rf.persist()
+	rf.persist()
 	//log.Println("leader",rf.me,"commitIndex",rf.commitIndex)
 }
 
@@ -795,6 +796,7 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 				}
 				applyCh <- applymsg // 此处可能阻塞
 			}
+			// 应用完状态机后，更新rf.lastApplied
 		}
 	}
 }

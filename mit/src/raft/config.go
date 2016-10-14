@@ -144,7 +144,7 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
-			//log.Println("get ApplyMsg from server",i,"index:",m.Index,"command:",m.Command)
+			log.Println("get ApplyMsg from server",i,"index:",m.Index,"command:",m.Command)
 			err_msg := ""
 			if m.UseSnapshot {
 				// ignore the snapshot
