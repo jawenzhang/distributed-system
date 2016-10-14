@@ -2,7 +2,7 @@ package raft
 
 // 所有server的原则 Rules for Servers
 // 1. 如果commitIndex > lastApplied:则递增lastApplied,应用 log[lastApplied] 到状态机之中
-// 2. 如果Rpc请求或回复包括纪元T > currentTerm: 设置currentTerm = T,转换成 follower
+// 2. 如果Rpc请求或回复包括纪元T > currentTerm: 设置currentTerm = T,转换成 follower, 并且设置 votedFor=-1，表示未投票
 
 // rules for Followers
 // 只接受 candidates与leaders的RPC请求
@@ -33,13 +33,19 @@ package raft
 // 接收者的处理逻辑：
 // 1. 如果term < currentTerm 则返回false
 // 2. 如果日志不包含一个在preLogIndex位置纪元为prevLogTerm的条目,则返回 false
+//		该规则是需要保证follower已经包含了leader在PrevLogIndex之前所有的日志了
 // 3. 如果一个已存在的条目与新条目冲突(同样的索引但是不同的纪元),则删除现存的该条目与其后的所有条
 // 4. 将不在log中的新条目添加到日志之中
 // 5. 如果leaderCommit > commitIndex,那么设置 commitIndex = min(leaderCommit,index of last new entry)
 
 // RequestVote RPC 的实现: 由候选者发起用于收集选票
 // 1. 如果term < currentTerm 则返回false
-// 2. 如果本地的voteFor为空或者为candidateId,并且候选者的日志至少与接受者的日志一样新,则投给其选票
+// 2. 如果本地的voteFor为空或者为candidateId,
+// 		并且候选者的日志至少与接受者的日志一样新,则投给其选票
+// 怎么定义日志新
+// 比较两份日志中最后一条日志条目的索引值和任期号定义谁的日志比较新
+// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新
+// 如果两份日志最后的条目任期号相同，那么日志比较长的那个就更加新。
 
 // 以上所有的规则保证的下面的几个点：
 // 1. Election Safety 在一个特定的纪元中最多只有一个Leader会被选举出来
@@ -49,8 +55,5 @@ package raft
 // 5. State Machine Safety:如果一个服务器在一个给定的index下应用一个日志条目到他的状态机上,没有其他服务器会在相同index上应用不同的日志条目
 
 
-
-// 针对上面的规则，我们来一步一步的实现
-// 先来看 RequestVote RPC
 
 

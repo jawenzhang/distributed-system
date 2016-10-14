@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"bytes"
 	"encoding/gob"
+	"math"
 )
 
 // import "bytes"
@@ -225,150 +226,84 @@ func (rf *Raft)Detail() string {
 	return detail
 }
 
+func (rf *Raft)rpcRuleForAllServer(term int) {
+	if term > rf.currentTerm {
+		rf.currentTerm = term
+		rf.status = STATUS_FOLLOWER
+		rf.votedFor = -1
+	}
+}
+// Receiver implementation
+// + 通用规则：如果Rpc请求或回复包括纪元T > currentTerm: 设置currentTerm = T,转换成 follower
+// 如果term < currentTerm 则返回false
+// 如果本地的voteFor为空或者为candidateId,并且候选者的日志至少与接受者的日志一样新,则投给其选票
 
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Receiver implementation
-	// 如果term < currentTerm 则返回false
-    // 如果本地的voteFor为空或者为candidateId,并且候选者的日志至少与接受者的日志一样新,则投给其选票
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// 对于是否投票需要考虑:
-	// 1. candidate's term 足够新
-	// 2. term要相等，本server还没有投票，或者投的就是candidate
-	// 怎么定义日志新
-	// 比较两份日志中最后一条日志条目的索引值和任期号定义谁的日志比较新
-	// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新
-	// 如果两份日志最后的条目任期号相同，那么日志比较长的那个就更加新。
+	rf.rpcRuleForAllServer(args.Term)
 
-	// 如果本server是leader，并且本leader的日志不少，则拒绝
-	if rf.status == STATUS_LEADER && len(rf.log) >= args.LastLogIndex + 1 {
-		reply.VoteGranted = false
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
 		return
 	}
-	// 如果candidate的任期小，并且日志也没有自己的多，则拒绝
-	if args.Term < rf.currentTerm && len(rf.log) >= args.LastLogIndex + 1 {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		return
-	}
-	// 如果candidate的任期和自己一样，但是本机已经投过票了，并且投的也不是candidate，则拒绝
-	if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		reply.VoteGranted = false
-		reply.Term = rf.currentTerm
-		return
-	}
-	if args.Term > rf.currentTerm {
-		// 转变为follower
-		rf.resetStateAndConvertToFollower(args.Term)
-	}
 
-	if rf.reqMoreUpToDate(&args) {
-		// candidate的日志更新，投票给他
-		rf.mu.Lock()
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.reqMoreUpToDate(&args){
 		rf.votedFor = args.CandidateId
-		rf.status = STATUS_FOLLOWER
-		rf.mu.Unlock()
+		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
-		reply.Term = rf.currentTerm
 		return
-	} else {
-		reply.VoteGranted = false
+	}else {
 		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
 		return
 	}
-
 	//log.Println("follower:",rf.me,"deal RequestVote done, voteGranted:", reply.VoteGranted)
 }
 
 
 //
-// example RequestVote RPC handler.
-//
 func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
-	// TODO:是否需要判断是否是心跳？
-	rf.heartbeatChan <- true
-
-	// 如果 term < currentTerm 就返回 false
-	if args.Term < rf.currentTerm && args.LeaderCommit <= rf.commitIndex {
-		// leader没有自己的任期高，并且leader提交的日志也没有自己的新
-		reply.Success = false
+	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		//log.Println("LeaderId:", args.LeaderId, "has small term:", args.Term, "than follower:", rf.me, "currentTerm:", currentTerm)
+		reply.Success = false
 		return
 	}
-	if args.Term > rf.currentTerm {
-		// 更新自己的任期
-		rf.currentTerm = args.Term
-		log.Println("LeaderId:", args.LeaderId, "has big term:", args.Term, "than follower:", rf.me, "currentTerm:", rf.currentTerm)
-		//rf.resetStateAndConvertToFollower(args.Term)
-		//return
-	}
-	if rf.status == STATUS_CANDIDATE {
-		// 如果是选举状态受到，则转换为follower，放弃本次选举
-		rf.status = STATUS_FOLLOWER
-	}
+	// 心跳一定来自leader
+	rf.heartbeatChan <- true
 
-	reply.Term = rf.currentTerm
-
-	//- 如果 term < currentTerm 就返回 false （5.1 节）
-	//- 如果日志在 prevLogIndex 位置处的日志条目的任期号和 prevLogTerm 不匹配，则返回 false （5.3 节）
-	//- 如果已经已经存在的日志条目和新的产生冲突（相同偏移量但是任期号不同），删除这一条和之后所有的 （5.3 节）
-	//- 附加任何在已有的日志中不存在的条目
-	//- 如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
-
-	//如果日志在 prevLogIndex 位置处的日志条目的任期号和 prevLogTerm 不匹配，则返回 false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.rpcRuleForAllServer(args.Term)
+	// 如果日志在 prevLogIndex 位置处的日志条目的任期号和 prevLogTerm 不匹配，则返回 false
 	// len(rf.log) >= args.PrevLogIndex + 1，说明本地日志长度 >= leader日志长度
 	if len(rf.log) >= args.PrevLogIndex + 1 && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
-		// 日志是匹配的
-		rf.mu.Lock()
-
-
-		//if args.LeaderCommit == rf.commitIndex {
-		//	log.Println(args.PrevLogIndex,args.Entries,rf.log)
-		//	log.Println(rf.Detail())
-		//}
-		//rf.log = rf.log[:args.PrevLogIndex + 1]// 一直取到rf.log[args.PrevLogIndex]的值
-		//rf.log = append(rf.log, args.Entries...)
-		//newlog := rf.log[:args.PrevLogIndex + 1]// 一直取到rf.log[args.PrevLogIndex]的值
-		//newlog = append(newlog, args.Entries...)
-		//
-		//if len(newlog) < rf.commitIndex + 1{
-		//	log.Println(args)
-		//	log.Fatal("short",rf.Detail())
-		//}
-
-		if args.LeaderCommit > rf.commitIndex {
-			// 只有leader中更大的commit才更新
-			rf.log = rf.log[:args.PrevLogIndex + 1]// 一直取到rf.log[args.PrevLogIndex]的值
-			rf.log = append(rf.log, args.Entries...)
-			// 如果 leaderCommit > commitIndex，令 commitIndex 等于 leaderCommit 和 新日志条目索引值中较小的一个
-			// 更新自身的commitIndex，但是在哪去更新lastApplied呢？在follower中需要一个单独的 goroutine ，去更新lastApplied
-			//log.Println("leader",args.LeaderId,"has big commit",args.LeaderCommit,"than me",rf.me,"commit",rf.commitIndex)
-			lastIndex := len(rf.log) - 1
-			if args.LeaderCommit > lastIndex {
-				rf.commitIndex = lastIndex
-			} else {
-				rf.commitIndex = args.LeaderCommit
+		// 该规则是需要保证follower已经包含了leader在PrevLogIndex之前所有的日志了
+		for i:=0;i<len(args.Entries);i++ {
+			if args.PrevLogIndex+1+i < len(rf.log){
+				if rf.log[args.PrevLogIndex+1+i] != args.Entries[i]{
+					// index相同，但是纪元不同
+					rf.log = rf.log[:args.PrevLogIndex+1+i]// 之前的还是相同的
+				}
+			}else {
+				// 本条目不存在
+				rf.log = append(rf.log,args.Entries[i])
 			}
-			if len(rf.log) < rf.commitIndex + 1 {
-				log.Fatal("rf short", rf.Detail())
-			}
-			//if rf.commitIndex+1 > len(rf.log){
-			//	log.Println(rf.Detail())
-			//}
-			//log.Println("after update,me",rf.me,"commit",rf.commitIndex)
-			//go rf.checkCommitIndexAndApplied()
-		} else {
-			//log.Println(rf.Detail())
-			//log.Println(args)
-			//log.Fatal("args.LeaderCommit < rf.commitIndex ", args.LeaderCommit, rf.commitIndex)
 		}
-		rf.mu.Unlock()
-		// 日志发生改变
-		go rf.persist()
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = int(math.Min(float64(args.LeaderCommit),float64(len(rf.log)-1)))
+		}
+		//在回复给RPCs之前需要更新到持久化存储之上
+		rf.persist()
+		reply.Term = rf.currentTerm
 		reply.Success = true
-	} else {
+		return
+	}else {
+		reply.Term = rf.currentTerm
 		reply.Success = false
+		return
 	}
 
 }
@@ -423,7 +358,6 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft)updateCommitIndex() {
 	// 如果存在一个N满足N>commitIndex,多数的matchIndex[i] >= N,并且 log[N].term == currentTerm:设置commitIndex = N
-	rf.mu.Lock()
 	// 找出 matchIndex（已经同步给各个follower的值）
 	newCommitIndex := rf.commitIndex
 	count := 0
@@ -439,17 +373,16 @@ func (rf *Raft)updateCommitIndex() {
 	if (count > len(rf.peers) / 2) && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
-		log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
+		//log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
 		rf.commitIndex = newCommitIndex
+		rf.persist()
 	}
 	//if len(rf.log) < rf.commitIndex + 1 {
 	//	// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
 	//	// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
 	//	log.Fatal("update!! ",rf.Detail())
 	//}
-	rf.mu.Unlock()
 	// commitIndex和log发生改变了
-	rf.persist()
 	//log.Println("leader",rf.me,"commitIndex",rf.commitIndex)
 }
 
@@ -464,15 +397,16 @@ func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *Appen
 			//log.Println("leader:",rf.me,"sendAppendEnties to",server,"and get reply",reply.Success)
 			// 更新nextInt和matchIndex
 			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
-			rf.mu.Unlock()
 			if rf.nextIndex[server] < 1 {
 				log.Fatal(rf.Detail())
 			}
 			// 在此处更新commitIndex
 			//log.Println(rf.nextIndex)
 			rf.updateCommitIndex()
+
 		} else {
 			// 不认同PrevLogIndex，重传
 			if rf.nextIndex[server] > 1 {
@@ -537,6 +471,10 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 		if i != rf.me && rf.status == STATUS_LEADER {
 			// ！！！由于此处使用goroutine,有可能后面的请求先到server，即大的rf.commitIndex先到，反而前面的请求后到，需要在处理端处理
 			go func(i int) {
+				if rf.status != STATUS_LEADER {
+					return
+				}
+				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[i] - 1
 				if prevLogIndex < 0 || prevLogIndex + 1 > len(rf.log) {
 					log.Fatal(rf.Detail())
@@ -555,6 +493,7 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 				//log.Println(fmt.Sprintf("leader:%d send LeaderCommit:%d,PrevLogIndex:%d,PrevLogTerm:%d to follower:%d",
 				//				args.LeaderId,args.LeaderCommit,args.PrevLogIndex,args.PrevLogTerm,i))
 				//}
+				rf.mu.Unlock()
 				rf.sendAppendEnties(i, args, reply)
 			}(i)
 		}
