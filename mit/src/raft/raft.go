@@ -327,7 +327,6 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 		reply.NextIndex = min(rf.commitIndex+1,args.PrevLogIndex-1)//
 		return
 	}
-
 }
 
 func (rf *Raft)incVoteCount() {
@@ -669,7 +668,6 @@ func (rf *Raft) candidate() {
 	// 第一步，新增本地任期和投票
 	rf.resetCandidateState()
 	// 第二步开始广播投票
-	//log.Println(fmt.Sprintf("candidate:%d begin to broadcastRequestVoteRPC",rf.me))
 	go rf.broadcastRequestVoteRPC()
 
 	// 第三步等待结果
@@ -694,18 +692,11 @@ func (rf *Raft) candidate() {
 }
 
 func (rf *Raft)follower() {
-	// 外层有forloop,因此此处没必要loop
-	rf.resetElectionTimeout()
-	//log.Println("now I am follower,index:", rf.me, "start election timeout:", rf.randomizedElectionTimeout)
 	// 等待心跳，如果心跳未到，但是选举超时了，则开始新一轮选举
 	select {
-	case <-rf.heartbeatChan: // 收到appendEntries就是一个heartbeatChan
-	case <-time.After(rf.randomizedElectionTimeout):
-	//  开始重新选举
-	//	log.Println("follower:", rf.me, "election timeout:", rf.randomizedElectionTimeout)
-		if rf.status != STATUS_FOLLOWER {
-			log.Fatal("status not right when in follower and after randomizedElectionTimeout:", rf.randomizedElectionTimeout)
-		}
+	case <-rf.heartbeatChan:
+	case <-time.After(rf.resetElectionTimeout()):
+		// 开始重新选举
 		rf.status = STATUS_CANDIDATE
 	}
 }
@@ -733,9 +724,6 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 		// 如果commitIndex > lastApplied，那么就 lastApplied 加一，并把log[lastApplied]应用到状态机中
 
 		if rf.commitIndex > rf.lastApplied {
-			//log.Println("server",rf.me,"is",rf.status,"(commitIndex,lastApplied)",rf.commitIndex,rf.lastApplied)
-			// 应用到状态机
-
 			if len(rf.log) < rf.commitIndex + 1 {
 				// 这种情况出现时不正常的，因为commitIndex应该是leader发过来的，最大不会超过rf.log
 				// 为什么会出现这个，大家想下，follower中如果commitIndex是server发过来的，可能出现commitIndex大，但是log还没有发送过来的情况
@@ -744,7 +732,6 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 			commitIndex := rf.commitIndex
 			lastApplied := rf.lastApplied
 			rf.lastApplied = commitIndex
-
 			for i := lastApplied + 1; i <= commitIndex; i++ {
 				applymsg := ApplyMsg{
 					Index:   rf.log[i].Index,

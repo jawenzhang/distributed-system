@@ -5,7 +5,7 @@ package raft
 // 2. 如果Rpc请求或回复包括纪元T > currentTerm: 设置currentTerm = T,转换成 follower, 并且设置 votedFor=-1，表示未投票
 
 // rules for Followers
-// 只接受 candidates与leaders的RPC请求
+// 回复 candidates与leaders的RPC请求
 // 如果选举超时时间达到,并且没有收到来自当前leader或者要求投票的候选者的 AppendEnties RPC调 :转换角色为candidate
 
 // rules for Candidates
