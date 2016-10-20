@@ -48,21 +48,21 @@ type ApplyMsg struct {
 }
 
 // 状态，leader，follower，candidate
-type RaftStatus int
+type RaftState int
 
 const (
-	STATUS_FOLLOWER RaftStatus = iota
-	STATUS_CANDIDATE
-	STATUS_LEADER
+	StateFollower RaftState = iota
+	StateCandidate
+	StateLeader
 )
 
-func convertStatusToString(status RaftStatus) string {
+func convertStatusToString(status RaftState) string {
 	switch status {
-	case STATUS_FOLLOWER:
+	case StateFollower:
 		return "follower"
-	case STATUS_CANDIDATE:
+	case StateCandidate:
 		return "candidate"
-	case STATUS_LEADER:
+	case StateLeader:
 		return "leader"
 	default:
 		return "unknow"
@@ -99,7 +99,7 @@ type Raft struct {
 	matchIndex                []int         // 记录已经同步给每个follower的日志index，初始化为0，单调递增
 
 											// 额外的数据
-	status                    RaftStatus    // 当前状态
+	state                     RaftState     // 当前状态
 	electionTimeout           time.Duration // 选举超时时间
 	heartbeatTimeout          time.Duration // 心跳超时时间
 	randomizedElectionTimeout time.Duration // 随机选举超时时间
@@ -124,7 +124,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader bool
 	// Your code here.
 	term = rf.currentTerm
-	isLeader = rf.status == STATUS_LEADER
+	isLeader = rf.state == StateLeader
 	return term, isLeader
 }
 
@@ -225,7 +225,7 @@ func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool {
 }
 
 func (rf *Raft)Detail() string {
-	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n", rf.me, rf.currentTerm, convertStatusToString(rf.status))
+	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n", rf.me, rf.currentTerm, convertStatusToString(rf.state))
 	detail += fmt.Sprintf("commitIndex:%d,lastApplied:%d\n", rf.commitIndex, rf.lastApplied)
 	detail += fmt.Sprintf("log is:%v\n", rf.log)
 	detail += fmt.Sprintf("nextIndex is:%v\n", rf.nextIndex)
@@ -236,7 +236,7 @@ func (rf *Raft)Detail() string {
 func (rf *Raft)rpcRuleForAllServer(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
-		rf.status = STATUS_FOLLOWER
+		rf.state = StateFollower
 		rf.votedFor = -1
 	}
 }
@@ -338,7 +338,7 @@ func (rf *Raft)incVoteCount() {
 }
 
 func (rf *Raft)judgeCandidateResult() {
-	if rf.status == STATUS_CANDIDATE && rf.votedCount > len(rf.peers) / 2 {
+	if rf.state == StateCandidate && rf.votedCount > len(rf.peers) / 2 {
 		rf.voteResultChan <- true
 	}
 }
@@ -391,7 +391,7 @@ func (rf *Raft)updateCommitIndex() {
 		}
 	}
 	//log.Println(count)
-	if (count > len(rf.peers) / 2) && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
+	if (count > len(rf.peers) / 2) && rf.state == StateLeader && rf.log[newCommitIndex].Term == rf.currentTerm{
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
 		//log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
@@ -461,7 +461,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	if rf.status != STATUS_LEADER {
+	if rf.state != StateLeader {
 		isLeader = false
 		return index, term, isLeader
 	}
@@ -489,7 +489,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft)broadcastAppendEntriesRPC() {
 	// 发送消息给给各个peer
 	for i := range rf.peers {
-		if i != rf.me && rf.status == STATUS_LEADER {
+		if i != rf.me && rf.state == StateLeader {
 			// ！！！由于此处使用goroutine,有可能后面的请求先到server，即大的rf.commitIndex先到，反而前面的请求后到，需要在处理端处理
 			go func(i int) {
 				rf.mu.Lock()
@@ -531,19 +531,19 @@ func (rf *Raft) resetElectionTimeout() time.Duration {
 }
 func (rf *Raft) convertToFollower() {
 	rf.mu.Lock()
-	rf.status = STATUS_FOLLOWER
+	rf.state = StateFollower
 	rf.mu.Unlock()
 }
 
 func (rf *Raft) convertToCandidate() {
 	rf.mu.Lock()
-	rf.status = STATUS_CANDIDATE
+	rf.state = StateCandidate
 	rf.mu.Unlock()
 }
 
 func (rf *Raft)convertToLeaderAndInitState() {
 	rf.mu.Lock()
-	rf.status = STATUS_LEADER
+	rf.state = StateLeader
 	maxIndex := len(rf.log)
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = maxIndex
@@ -555,14 +555,14 @@ func (rf *Raft)convertToLeaderAndInitState() {
 
 func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
-	rf.status = STATUS_LEADER
+	rf.state = StateLeader
 	rf.mu.Unlock()
 }
 
 func (rf *Raft) resetStateAndConvertToFollower(term int) {
 	rf.mu.Lock()
 	rf.currentTerm = term
-	rf.status = STATUS_FOLLOWER
+	rf.state = StateFollower
 	rf.votedFor = -1
 	rf.mu.Unlock()
 }
@@ -579,9 +579,9 @@ func (rf *Raft) broadcastRequestVoteRPC() {
 		LastLogTerm:  rf.log[len(rf.log) - 1].Term,
 	}
 	for i := range rf.peers {
-		if i != rf.me && rf.status == STATUS_CANDIDATE {
+		if i != rf.me && rf.state == StateCandidate {
 			go func(index int, args RequestVoteArgs) {
-				if rf.status != STATUS_CANDIDATE {
+				if rf.state != StateCandidate {
 					return
 				}
 				reply := &RequestVoteReply{}
@@ -662,7 +662,7 @@ func (rf *Raft) candidate() {
 	case <-rf.voteResultChan:
 	case <-rf.heartbeatChan:
 		// 退出选举,转变为follower
-		rf.status = STATUS_FOLLOWER
+		rf.state = StateFollower
 		return
 	default:
 	}
@@ -689,7 +689,7 @@ func (rf *Raft) candidate() {
 	// 开始新的选举
 	case <-rf.heartbeatChan:
 	// 收到别的服务器已经转变为leader的通知，退出选举,转变为follower
-		rf.status = STATUS_FOLLOWER
+		rf.state = StateFollower
 	}
 }
 
@@ -699,26 +699,27 @@ func (rf *Raft)follower() {
 	case <-rf.heartbeatChan:
 	case <-time.After(rf.resetElectionTimeout()):
 		// 开始重新选举
-		rf.status = STATUS_CANDIDATE
+		rf.state = StateCandidate
 	}
 }
 
 func (rf *Raft) loop() {
 	for {
-		switch rf.status {
-		case STATUS_FOLLOWER:
+		// 此处操作都是串行的
+		switch rf.state {
+		case StateFollower:
 			rf.follower()
-		case STATUS_CANDIDATE: // 开始新选举
+		case StateCandidate: // 开始新选举
 			//log.Println("now I begin to candidate,index:", rf.me)
 			rf.candidate()
-		case STATUS_LEADER:
+		case StateLeader:
 			//log.Println("now I am the leader,index:", rf.me)
 			rf.leader()
 		}
 	}
 }
 // 此处好的方法是stateMachine和其他通过channel通道
-func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
+func (rf *Raft)stateMachine(applyCh chan<- ApplyMsg) {
 	// 在此运用已经agree的日志到状态机
 	for {
 		// ！！！！此处必须要有一个sleep，不然相当于此goroutine一直占有cpu，不会放弃
@@ -772,9 +773,9 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.log = []Log{{Term: rf.currentTerm, Index: 0}}
-	rf.status = STATUS_FOLLOWER
+	rf.state = StateFollower
 	rf.electionTimeout = 1000 * time.Millisecond // 1000ms
-	rf.heartbeatTimeout = 50 * time.Millisecond
+	rf.heartbeatTimeout = 500 * time.Millisecond
 	cnt := len(rf.peers)
 	rf.nextIndex = make([]int, cnt)
 	rf.matchIndex = make([]int, cnt)
