@@ -30,6 +30,8 @@ import (
 	"reflect"
 )
 
+// 开始对raft进行重构，参考etcd-raft的实现
+
 // import "bytes"
 // import "encoding/gob"
 
