@@ -1,0 +1,22 @@
+{
+	"version": 0,
+	"dependencies": [
+		{
+			"importpath": "github.com/astaxie/beego/logs",
+			"repository": "https://github.com/astaxie/beego",
+			"vcs": "git",
+			"revision": "2d87d4feafeea0a133d217a82e6e02df0348fed5",
+			"branch": "master",
+			"path": "/logs",
+			"notests": true
+		},
+		{
+			"importpath": "github.com/belogik/goes",
+			"repository": "https://github.com/belogik/goes",
+			"vcs": "git",
+			"revision": "e54d722c3aff588e4c737fe11c07359019240824",
+			"branch": "master",
+			"notests": true
+		}
+	]
+}
