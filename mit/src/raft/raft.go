@@ -18,23 +18,57 @@ package raft
 //
 
 import (
-	"sync"
 	"labrpc"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 	//"fmt"
-	"fmt"
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"reflect"
+	"github.com/astaxie/beego/logs"
 )
 
 // 开始对raft进行重构，参考etcd-raft的实现
 
-// import "bytes"
-// import "encoding/gob"
 
+const None int = -1
+
+// lockedRand is a small wrapper around rand.Rand to provide
+// synchronization. Only the methods needed by the code are exposed
+// (e.g. Intn).
+type lockedRand struct {
+	mu   sync.Mutex
+	rand *rand.Rand
+}
+
+func (r *lockedRand) Intn(n int) int {
+	r.mu.Lock()
+	v := r.rand.Intn(n)
+	r.mu.Unlock()
+	return v
+}
+
+var globalRand = &lockedRand{
+	rand: rand.New(rand.NewSource(time.Now().UnixNano())),
+}
+
+type MessageType int32
+const (
+	MsgHup            MessageType = iota
+	MsgBeat
+	MsgHeartbeatResp
+)
+
+type Message struct{
+	Type MessageType
+	To int
+	svcMeth string
+	args interface{}
+	reply interface{}
+}
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -48,66 +82,90 @@ type ApplyMsg struct {
 }
 
 // 状态，leader，follower，candidate
-type RaftStatus int
+type RaftState int
 
 const (
-	STATUS_FOLLOWER RaftStatus = iota
-	STATUS_CANDIDATE
-	STATUS_LEADER
+	StateFollower RaftState = iota
+	StateCandidate
+	StateLeader
 )
 
-func convertStatusToString(status RaftStatus) string {
+func convertStateToString(status RaftState) string {
 	switch status {
-	case STATUS_FOLLOWER:
+	case StateFollower:
 		return "follower"
-	case STATUS_CANDIDATE:
+	case StateCandidate:
 		return "candidate"
-	case STATUS_LEADER:
+	case StateLeader:
 		return "leader"
 	default:
 		return "unknow"
 	}
 }
 
+type stepFunc func(r *Raft, m Message)
+type handleFunc func(r *Raft, m Message)
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu                        sync.Mutex
-	peers                     []*labrpc.ClientEnd
-	persister                 *Persister
-	me                        int           // index into peers[]
+	mu                         sync.Mutex
+	peers                      []*labrpc.ClientEnd
+	persister                  *Persister
+	me                         int           // index into peers[]
 
-											// Your data here.
-											// Look at the paper's Figure 2 for a description of what
-											// state a Raft server must maintain.
-											//
-											// Persistent state on all servers，需要持久化的数据，通过 persister 持久化
-											//
-	currentTerm               int           // 当前任期，单调递增，初始化为0
-	votedFor                  int           // 当前任期内收到的Candidate号，如果没有为-1
-	log                       []Log         // 日志，包含任期和命令，从下标1开始
-											// Volatile state on all servers
-											//
-	commitIndex               int           // 已提交的日志，即运用到状态机上
-	lastApplied               int           // 已运用到状态机上的最大日志id,初始是0，单调递增
-											//
-											// Volatile state on leaders，选举后都重新初始化
-											//
-	nextIndex                 []int         // 记录发送给每个follower的下一个日志index，初始化为leader最大日志+1
-	matchIndex                []int         // 记录已经同步给每个follower的日志index，初始化为0，单调递增
+											 // Your data here.
+											 // Look at the paper's Figure 2 for a description of what
+											 // state a Raft server must maintain.
+											 //
+											 // Persistent state on all servers，需要持久化的数据，通过 persister 持久化
+											 //
+	currentTerm                int           // 当前任期，单调递增，初始化为0
+	votedFor                   int           // 当前任期内收到的Candidate号，如果没有为-1
+	log                        []Log         // 日志，包含任期和命令，从下标1开始
+											 // Volatile state on all servers
+											 //
+	commitIndex                int           // 已提交的日志，即运用到状态机上
+	lastApplied                int           // 已运用到状态机上的最大日志id,初始是0，单调递增
+											 //
+											 // Volatile state on leaders，选举后都重新初始化
+											 //
+	nextIndex                  []int         // 记录发送给每个follower的下一个日志index，初始化为leader最大日志+1
+	matchIndex                 []int         // 记录已经同步给每个follower的日志index，初始化为0，单调递增
 
-											// 额外的数据
-	status                    RaftStatus    // 当前状态
-	electionTimeout           time.Duration // 选举超时时间
-	heartbeatTimeout          time.Duration // 心跳超时时间
-	randomizedElectionTimeout time.Duration // 随机选举超时时间
-											// randomizedElectionTimeout 在[electiontimeout, 2 * electiontimeout - 1]之间的一个随机数
-											// 当状态变为follower和candidate都会重置
-	heartbeatChan             chan bool
-	voteResultChan            chan bool     // 选举是否成功
-	votedCount                int           // 收到的投票数
+											 // 额外的数据
+	state                      RaftState     // 当前状态
+	electionTimeoutD           time.Duration // 选举超时时间
+	heartbeatTimeoutD          time.Duration // 心跳超时时间
+
+	electionElapsed            int           //
+	heartbeatElapsed           int
+
+	heartbeatTimeout           int
+	electionTimeout            int
+
+	randomizedElectionTimeout  int
+
+	randomizedElectionTimeoutD time.Duration // 随机选举超时时间
+											 // randomizedElectionTimeout 在[electiontimeout, 2 * electiontimeout - 1]之间的一个随机数
+											 // 当状态变为follower和candidate都会重置
+	heartbeatChan              chan bool
+	voteResultChan             chan bool     // 选举是否成功
+	votedCount                 int           // 收到的投票数
+
+	tickc                      chan struct{} // 定时器
+	tick func()
+	logger                     *logs.BeeLogger // 日志
+	lead 						int // 记录当前哪个server是lead
+	votes map[int]bool // 记录投票结果
+	step stepFunc
+	handle handleFunc
+
+	msgChan chan Message
+	replyChan chan Message
+	commitC bool // 当有新的commit更新
+	applyCh chan ApplyMsg
 }
 
 type Log struct {
@@ -124,7 +182,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader bool
 	// Your code here.
 	term = rf.currentTerm
-	isLeader = rf.status == STATUS_LEADER
+	isLeader = rf.state == StateLeader
 	return term, isLeader
 }
 
@@ -145,8 +203,8 @@ func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.currentTerm) // 当前任期
-	e.Encode(rf.log) // 收到的日志
-	e.Encode(rf.votedFor) // 投票的
+	e.Encode(rf.log)         // 收到的日志
+	e.Encode(rf.votedFor)    // 投票的
 	e.Encode(rf.commitIndex) // 已经确认的一致性日志，之后的日志表示还没有确认是否可以同步，一旦确认的日志都不会改变了
 	//e.Encode(rf.lastApplied)
 	//e.Encode(rf.nextIndex)
@@ -195,7 +253,7 @@ type RequestVoteReply struct {
 }
 
 // 遇到的坑，字段必须大写，不然encode和decode的时候出错
-type    AppendEntiesArgs struct {
+type AppendEntiesArgs struct {
 	Term         int   // candidate的任期
 	LeaderId     int
 	LeaderCommit int   // 已提交的日志，即运用到状态机上
@@ -204,12 +262,12 @@ type    AppendEntiesArgs struct {
 	Entries      []Log // 发送的日志条目
 }
 type AppendEntiesReply struct {
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
-	NextIndex int // 为了加快寻找，直接返回下一个需要传递的日志下标
+	Term      int  // currentTerm, for leader to update itself
+	Success   bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	NextIndex int  // 为了加快寻找，直接返回下一个需要传递的日志下标
 }
 
-func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool {
+func (rf *Raft) reqMoreUpToDate(args *RequestVoteArgs) bool {
 	// 比较两份日志中最后一条日志条目的索引值和任期号定义谁的日志比较新
 	// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新
 	// 如果两份日志最后的条目任期号相同，那么日志比较长的那个就更加新。
@@ -219,13 +277,13 @@ func (rf *Raft)reqMoreUpToDate(args *RequestVoteArgs) bool {
 	//log.Println(lastLog,rlastIndex,rlastIndex)
 	if rlastTerm != lastLog.Term {
 		return rlastTerm >= lastLog.Term
-	}else {
+	} else {
 		return rlastIndex >= lastLog.Index
 	}
 }
 
-func (rf *Raft)Detail() string {
-	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n", rf.me, rf.currentTerm, convertStatusToString(rf.status))
+func (rf *Raft) Detail() string {
+	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n", rf.me, rf.currentTerm, convertStateToString(rf.state))
 	detail += fmt.Sprintf("commitIndex:%d,lastApplied:%d\n", rf.commitIndex, rf.lastApplied)
 	detail += fmt.Sprintf("log is:%v\n", rf.log)
 	detail += fmt.Sprintf("nextIndex is:%v\n", rf.nextIndex)
@@ -233,13 +291,14 @@ func (rf *Raft)Detail() string {
 	return detail
 }
 
-func (rf *Raft)rpcRuleForAllServer(term int) {
+func (rf *Raft) rpcRuleForAllServer(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
-		rf.status = STATUS_FOLLOWER
+		rf.state = StateFollower
 		rf.votedFor = -1
 	}
 }
+
 // Receiver implementation
 // + 通用规则：如果Rpc请求或回复包括纪元T > currentTerm: 设置currentTerm = T,转换成 follower
 // 如果term < currentTerm 则返回false
@@ -257,12 +316,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.reqMoreUpToDate(&args){
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.reqMoreUpToDate(&args) {
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		return
-	}else {
+	} else {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 		return
@@ -276,6 +335,7 @@ func min(x, y int) int {
 	}
 	return y
 }
+
 //
 func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	if args.Term < rf.currentTerm {
@@ -298,22 +358,22 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	// len(rf.log) >= args.PrevLogIndex + 1，说明本地日志长度 >= leader日志长度
 	if len(rf.log) >= args.PrevLogIndex + 1 && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 		// 该规则是需要保证follower已经包含了leader在PrevLogIndex之前所有的日志了
-		for i:=0;i<len(args.Entries);i++ {
-			if args.PrevLogIndex+1+i < len(rf.log){
-				if rf.log[args.PrevLogIndex+1+i] != args.Entries[i]{
+		for i := 0; i < len(args.Entries); i++ {
+			if args.PrevLogIndex + 1 + i < len(rf.log) {
+				if rf.log[args.PrevLogIndex + 1 + i] != args.Entries[i] {
 					// index相同，但是纪元不同
-					rf.log = rf.log[:args.PrevLogIndex+1+i]// 之前的还是相同的，再加上本条之后的
-					rf.log = append(rf.log,args.Entries[i:]...)
+					rf.log = rf.log[:args.PrevLogIndex + 1 + i] // 之前的还是相同的，再加上本条之后的
+					rf.log = append(rf.log, args.Entries[i:]...)
 					break
 				}
-			}else {
+			} else {
 				// 本条目不存在
-				rf.log = append(rf.log,args.Entries[i:]...)
+				rf.log = append(rf.log, args.Entries[i:]...)
 				break
 			}
 		}
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit,len(rf.log)-1)
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
 		}
 		// !!为了查明为什么日志错了
 		rf.checkLog(args)
@@ -323,22 +383,22 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 		reply.Success = true
 		reply.NextIndex = len(rf.log)
 		return
-	}else {
+	} else {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		reply.NextIndex = min(rf.commitIndex+1,args.PrevLogIndex-1)//
+		reply.NextIndex = min(rf.commitIndex + 1, args.PrevLogIndex - 1) //
 		return
 	}
 }
 
-func (rf *Raft)incVoteCount() {
+func (rf *Raft) incVoteCount() {
 	rf.mu.Lock()
 	rf.votedCount++
 	rf.mu.Unlock()
 }
 
-func (rf *Raft)judgeCandidateResult() {
-	if rf.status == STATUS_CANDIDATE && rf.votedCount > len(rf.peers) / 2 {
+func (rf *Raft) judgeCandidateResult() {
+	if rf.state == StateCandidate && rf.votedCount > len(rf.peers) / 2 {
 		rf.voteResultChan <- true
 	}
 }
@@ -377,21 +437,21 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft)updateCommitIndex() {
+func (rf *Raft) updateCommitIndex() {
 	// 如果存在一个N满足N>commitIndex,多数的matchIndex[i] >= N,并且 log[N].term == currentTerm:设置commitIndex = N
 	// 找出 matchIndex（已经同步给各个follower的值）
 	newCommitIndex := rf.commitIndex
 	count := 0
 	for _, nextIndex := range rf.nextIndex {
-		if nextIndex-1 > rf.commitIndex {
+		if nextIndex - 1 > rf.commitIndex {
 			count++
-			if newCommitIndex == rf.commitIndex || newCommitIndex > nextIndex-1 {
-				newCommitIndex = nextIndex-1
+			if newCommitIndex == rf.commitIndex || newCommitIndex > nextIndex - 1 {
+				newCommitIndex = nextIndex - 1
 			}
 		}
 	}
 	//log.Println(count)
-	if (count > len(rf.peers) / 2) && rf.status == STATUS_LEADER && rf.log[newCommitIndex].Term == rf.currentTerm{
+	if (count > len(rf.peers) / 2) && rf.state == StateLeader && rf.log[newCommitIndex].Term == rf.currentTerm {
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
 		//log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
@@ -420,14 +480,14 @@ func (rf *Raft) sendAppendEnties(server int, args AppendEntiesArgs, reply *Appen
 			}
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
 			if rf.nextIndex[server] < 1 {
-				log.Fatal("rf.nextIndex[server]<1",rf.Detail())
+				log.Fatal("rf.nextIndex[server]<1", rf.Detail())
 			}
 			rf.updateCommitIndex()
 		} else {
 			// 不认同PrevLogIndex，重传
 			rf.nextIndex[server] = reply.NextIndex
-			if reply.NextIndex > len(rf.log){
-				log.Fatal("get big NextIndex from",server,"args",args,"reply",reply)
+			if reply.NextIndex > len(rf.log) {
+				log.Fatal("get big NextIndex from", server, "args", args, "reply", reply)
 			}
 			//if rf.nextIndex[server] > 1 {
 			//	rf.nextIndex[server]--
@@ -461,7 +521,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 	isLeader := true
 
-	if rf.status != STATUS_LEADER {
+	if rf.state != StateLeader {
 		isLeader = false
 		return index, term, isLeader
 	}
@@ -472,7 +532,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := Log{
 		Term:    term,
 		Command: command,
-		Index:index,
+		Index:   index,
 	}
 	// 1)Leader将该请求记录到自己的日志之中;
 	rf.log = append(rf.log, entry)
@@ -486,24 +546,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft)broadcastAppendEntriesRPC() {
+func (rf *Raft) broadcastAppendEntriesRPC() {
 	// 发送消息给给各个peer
 	for i := range rf.peers {
-		if i != rf.me && rf.status == STATUS_LEADER {
+		if i != rf.me && rf.state == StateLeader {
 			// ！！！由于此处使用goroutine,有可能后面的请求先到server，即大的rf.commitIndex先到，反而前面的请求后到，需要在处理端处理
 			go func(i int) {
 				rf.mu.Lock()
 				prevLogIndex := rf.nextIndex[i] - 1
 				if prevLogIndex < 0 || prevLogIndex + 1 > len(rf.log) {
-					log.Fatal("prevLogIndex < 0  || prevLogIndex + 1 > len(rf.log)",rf.Detail())
+					log.Fatal("prevLogIndex < 0  || prevLogIndex + 1 > len(rf.log)", rf.Detail())
 				}
 				args := AppendEntiesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
 					LeaderCommit: rf.commitIndex,
 					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:rf.log[prevLogIndex].Term,
-					Entries:rf.log[prevLogIndex + 1:], // 如果没有新日志，自然而然是空
+					PrevLogTerm:  rf.log[prevLogIndex].Term,
+					Entries:      rf.log[prevLogIndex + 1:], // 如果没有新日志，自然而然是空
 				}
 				rf.mu.Unlock()
 				reply := &AppendEntiesReply{}
@@ -512,7 +572,6 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 		}
 	}
 }
-
 
 //
 // the tester calls Kill() when a Raft instance won't
@@ -523,27 +582,31 @@ func (rf *Raft)broadcastAppendEntriesRPC() {
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
+func (rf *Raft)resetRandomizedElectionTimeout() {
+	rf.randomizedElectionTimeout = rf.electionTimeout + globalRand.Intn(rf.electionTimeout)
+}
+
 func (rf *Raft) resetElectionTimeout() time.Duration {
 	//[electiontimeout, 2 * electiontimeout - 1]
 	rand.Seed(time.Now().UTC().UnixNano())
-	rf.randomizedElectionTimeout = rf.electionTimeout + time.Duration(rand.Int63n(rf.electionTimeout.Nanoseconds()))
-	return rf.randomizedElectionTimeout
+	rf.randomizedElectionTimeoutD = rf.electionTimeoutD + time.Duration(rand.Int63n(rf.electionTimeoutD.Nanoseconds()))
+	return rf.randomizedElectionTimeoutD
 }
 func (rf *Raft) convertToFollower() {
 	rf.mu.Lock()
-	rf.status = STATUS_FOLLOWER
+	rf.state = StateFollower
 	rf.mu.Unlock()
 }
 
 func (rf *Raft) convertToCandidate() {
 	rf.mu.Lock()
-	rf.status = STATUS_CANDIDATE
+	rf.state = StateCandidate
 	rf.mu.Unlock()
 }
 
-func (rf *Raft)convertToLeaderAndInitState() {
+func (rf *Raft) convertToLeaderAndInitState() {
 	rf.mu.Lock()
-	rf.status = STATUS_LEADER
+	rf.state = StateLeader
 	maxIndex := len(rf.log)
 	for i := 0; i < len(rf.peers); i++ {
 		rf.nextIndex[i] = maxIndex
@@ -555,14 +618,14 @@ func (rf *Raft)convertToLeaderAndInitState() {
 
 func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
-	rf.status = STATUS_LEADER
+	rf.state = StateLeader
 	rf.mu.Unlock()
 }
 
 func (rf *Raft) resetStateAndConvertToFollower(term int) {
 	rf.mu.Lock()
 	rf.currentTerm = term
-	rf.status = STATUS_FOLLOWER
+	rf.state = StateFollower
 	rf.votedFor = -1
 	rf.mu.Unlock()
 }
@@ -579,15 +642,15 @@ func (rf *Raft) broadcastRequestVoteRPC() {
 		LastLogTerm:  rf.log[len(rf.log) - 1].Term,
 	}
 	for i := range rf.peers {
-		if i != rf.me && rf.status == STATUS_CANDIDATE {
+		if i != rf.me && rf.state == StateCandidate {
 			go func(index int, args RequestVoteArgs) {
-				if rf.status != STATUS_CANDIDATE {
+				if rf.state != StateCandidate {
 					return
 				}
 				reply := &RequestVoteReply{}
 				//log.Println(fmt.Sprintf("candidate:%d sendRequestVote to %d",rf.me,index))
 				rf.sendRequestVote(index, args, reply)
-			}(i,args)
+			}(i, args)
 		}
 	}
 }
@@ -638,14 +701,13 @@ func (rf *Raft) broadcastRequestVoteRPC() {
 
 // 成为leader，开始心跳
 
-
 func (rf *Raft) leader() {
 	// 外层loop
-	time.Sleep(rf.heartbeatTimeout)
+	time.Sleep(rf.heartbeatTimeoutD)
 	go rf.broadcastAppendEntriesRPC()
 }
 
-func (rf *Raft)resetCandidateState() {
+func (rf *Raft) resetCandidateState() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
@@ -661,8 +723,8 @@ func (rf *Raft) candidate() {
 	select {
 	case <-rf.voteResultChan:
 	case <-rf.heartbeatChan:
-		// 退出选举,转变为follower
-		rf.status = STATUS_FOLLOWER
+	// 退出选举,转变为follower
+		rf.state = StateFollower
 		return
 	default:
 	}
@@ -689,36 +751,38 @@ func (rf *Raft) candidate() {
 	// 开始新的选举
 	case <-rf.heartbeatChan:
 	// 收到别的服务器已经转变为leader的通知，退出选举,转变为follower
-		rf.status = STATUS_FOLLOWER
+		rf.state = StateFollower
 	}
 }
 
-func (rf *Raft)follower() {
+func (rf *Raft) follower() {
 	// 等待心跳，如果心跳未到，但是选举超时了，则开始新一轮选举
 	select {
 	case <-rf.heartbeatChan:
 	case <-time.After(rf.resetElectionTimeout()):
-		// 开始重新选举
-		rf.status = STATUS_CANDIDATE
+	// 开始重新选举
+		rf.state = StateCandidate
 	}
 }
 
 func (rf *Raft) loop() {
+
 	for {
-		switch rf.status {
-		case STATUS_FOLLOWER:
+		switch rf.state {
+		case StateFollower:
 			rf.follower()
-		case STATUS_CANDIDATE: // 开始新选举
+		case StateCandidate: // 开始新选举
 			//log.Println("now I begin to candidate,index:", rf.me)
 			rf.candidate()
-		case STATUS_LEADER:
+		case StateLeader:
 			//log.Println("now I am the leader,index:", rf.me)
 			rf.leader()
 		}
 	}
 }
+
 // 此处好的方法是stateMachine和其他通过channel通道
-func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
+func (rf *Raft) stateMachine(applyCh chan ApplyMsg) {
 	// 在此运用已经agree的日志到状态机
 	for {
 		// ！！！！此处必须要有一个sleep，不然相当于此goroutine一直占有cpu，不会放弃
@@ -745,6 +809,170 @@ func (rf *Raft)stateMachine(applyCh chan ApplyMsg) {
 		}
 	}
 }
+func (r *Raft) pastElectionTimeout() bool {
+	return r.electionElapsed >= r.randomizedElectionTimeout
+}
+func (raft *Raft)tickElection() {
+	raft.electionElapsed++
+	if raft.pastElectionTimeout() {
+		raft.electionElapsed = 0
+
+	}
+}
+func (r *Raft) tickHeartbeat() {
+	r.heartbeatElapsed++
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		//r.Step()
+		r.Step(Message{Type:MsgBeat})
+	}
+}
+// bcastHeartbeat sends RPC, without entries to all the peers.
+func (r *Raft) bcastHeartbeat() {
+	for i,_ := range r.peers {
+		if i == r.me {
+			continue
+		}
+		r.msgChan <- Message{Type:MsgBeat,To:i}
+	}
+}
+func stepLeader(r *Raft, m Message){
+	switch m.Type {
+	case MsgBeat:
+		r.bcastHeartbeat()
+		return
+	}
+}
+
+func (r *Raft)Step(m Message) error{
+	if m.Type == MsgHup {
+		if r.state != StateLeader {
+			r.logger.Info("%x is starting a new election at term %d", r.me, r.currentTerm)
+
+		}else {
+			r.logger.Debug("%x ignoring MsgHup because already leader", r.me)
+		}
+		return nil
+	}
+	r.step(r,m)
+	return nil
+}
+
+func (r *Raft) quorum() int { return len(r.peers)/2 + 1 }
+
+
+// 开始选举
+func (r *Raft) campaign() {
+	r.becomeCandidate()
+	if r.quorum() == r.poll(r.me,true){
+
+	}
+}
+func (r *Raft)sendMsg(m Message){
+	ok := r.peers[m.To].Call(m.svcMeth,m.args,&m.reply)
+	if ok {
+		r.replyChan <- m // 统一发送给回复channel
+	}else {
+		r.logger.Info("call %s fail",m.svcMeth)
+	}
+}
+func (r *Raft)serveChannels() {
+	select {
+	case m := <-r.msgChan:
+		go r.sendMsg(m)
+	}
+}
+// 处理消息回复
+func handleLeader(r *Raft, m Message) {
+	switch m.Type {
+	case MsgBeat: // 不用处理
+
+	}
+}
+
+func (r *Raft)applyCommitLog() {
+	if r.commitIndex > r.lastApplied {
+		for i:=r.lastApplied;i<=r.commitIndex;i++ {
+			r.applyCh <- ApplyMsg{Index:r.log[i].Index,Command:r.log[i].Command}
+		}
+	}
+}
+
+func (r *Raft)run() {
+	ticker := time.NewTicker(100 * time.Millisecond) // 100ms
+	defer ticker.Stop() // 定时发生器
+
+	for {
+		// 写操作通过channel进行了强制排队
+		select {
+		case <- ticker:
+			r.tick()
+		case m := <- r.replyChan: // rpc处理结果通道
+			r.handle(r,m)
+		}
+	}
+}
+
+
+// 给自己设置投票结果，并且得到支持的票数
+func (r *Raft) poll(id uint64, v bool) (granted int) {
+	if v {
+		r.logger.Info("%x received vote from %x at term %d", r.me, id, r.currentTerm)
+	} else {
+		r.logger.Info("%x received vote rejection from %x at term %d", r.me, id, r.currentTerm)
+	}
+	if _, ok := r.votes[id]; !ok {
+		r.votes[id] = v
+	}
+	for _, vv := range r.votes {
+		if vv {
+			granted++
+		}
+	}
+	return granted
+}
+
+func (raft *Raft)reset(term int) {
+	if raft.currentTerm != term{
+		raft.currentTerm = term
+		raft.votedFor = None
+	}
+	raft.lead = None
+	raft.heartbeatElapsed = 0
+	raft.electionElapsed = 0
+	raft.resetRandomizedElectionTimeout()
+	raft.votes = make(map[int]bool)
+}
+
+func (raft *Raft)becomeFollower(term uint64, lead uint64) {
+	raft.reset(term)
+	raft.tick = raft.tickElection
+	raft.state = StateFollower
+	raft.lead = lead
+	raft.logger.Info("%x became follower at term %d", raft.me, raft.currentTerm)
+}
+
+func (raft *Raft)becomeCandidate() {
+	if raft.state == StateLeader {
+		raft.logger.Error()
+		panic("invalid transition [leader -> candidate]")
+	}
+	raft.reset(raft.currentTerm+1)
+	raft.tick = raft.tickElection
+	raft.votedFor = raft.me
+	raft.state = StateCandidate
+	raft.logger.Info("%x became candidate at term %d", raft.me, raft.currentTerm)
+}
+func (r *Raft) becomeLeader() {
+	if r.state == StateFollower {
+		panic("invalid transition [follower -> leader]")
+	}
+	r.reset(r.currentTerm)
+	r.lead = r.me
+	r.state = StateLeader
+	r.tick = r.tickHeartbeat
+	r.step = stepLeader
+	r.logger.Info("%x became leader at term %d", r.me, r.currentTerm)
+}
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -767,14 +995,26 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.persister = persister
 	rf.me = me
 
+	//ticker := time.NewTicker(100 * time.Millisecond) // 100ms
+	//defer ticker.Stop() // 定时发生器
+	// 新的初始化函数
+	rf.electionTimeout = 10
+	rf.heartbeatTimeout = 5
+	rf.logger = logs.NewLogger()
+	rf.logger.SetLogger(logs.AdapterConsole)
+	rf.logger.EnableFuncCallDepth() // 输出行号和文件名
+
+	rf.applyCh = applyCh
+
+
 	rf.heartbeatChan = make(chan bool)
 	rf.voteResultChan = make(chan bool)
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.log = []Log{{Term: rf.currentTerm, Index: 0}}
-	rf.status = STATUS_FOLLOWER
-	rf.electionTimeout = 1000 * time.Millisecond // 1000ms
-	rf.heartbeatTimeout = 50 * time.Millisecond
+	rf.state = StateFollower
+	rf.electionTimeoutD = 1000 * time.Millisecond // 1000ms
+	rf.heartbeatTimeoutD = 500 * time.Millisecond
 	cnt := len(rf.peers)
 	rf.nextIndex = make([]int, cnt)
 	rf.matchIndex = make([]int, cnt)
@@ -787,7 +1027,9 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	// check index
 	rf.checkLog(1)
 
-	for i :=0; i < cnt; i++ {
+	// 初始化结束后，调用函数
+
+	for i := 0; i < cnt; i++ {
 		rf.nextIndex[i] = len(rf.log)
 	}
 
@@ -797,12 +1039,11 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	return rf
 }
 
-func (rf *Raft)checkLog(v interface{}) {
-	for i:=0;i<len(rf.log);i++ {
+func (rf *Raft) checkLog(v interface{}) {
+	for i := 0; i < len(rf.log); i++ {
 		if i != rf.log[i].Index {
-			log.Println("check log type:",reflect.TypeOf(v).String(),"value:",v)
-			log.Fatal("error log index",rf.Detail())
+			log.Println("check log type:", reflect.TypeOf(v).String(), "value:", v)
+			log.Fatal("error log index", rf.Detail())
 		}
 	}
 }
-
