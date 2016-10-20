@@ -142,6 +142,7 @@ func (rc *raftNode) entriesToApply(ents []raftpb.Entry) (nents []raftpb.Entry) {
 
 // publishEntries writes committed log entries to commit channel and returns
 // whether all entries could be published.
+//=> 将已经提交的 entries 写到 commit channel，然后返回是否所有的 Entries 都可以提交
 func (rc *raftNode) publishEntries(ents []raftpb.Entry) bool {
 	for i := range ents {
 		switch ents[i].Type {
@@ -388,7 +389,7 @@ func (rc *raftNode) serveChannels() {
 					// blocks until accepted by raft state machine
 					rc.node.Propose(context.TODO(), []byte(prop))
 				}
-
+			//=> 配置变化，在httpapi中写入
 			case cc, ok := <-rc.confChangeC:
 				if !ok {
 					rc.confChangeC = nil
