@@ -16,6 +16,7 @@ import "sync/atomic"
 import (
 	"sync"
 	//"log"
+	//"log"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -176,6 +177,7 @@ func TestFailNoAgree(t *testing.T) {
 
 	n, _ := cfg.nCommitted(index)
 	if n > 0 {
+		//t.Log(cfg.rafts[leader].Detail(),cfg.rafts[(leader + 4) % servers].Detail())
 		t.Fatalf("%v committed but no majority", n)
 	}
 

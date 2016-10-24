@@ -153,11 +153,11 @@ func (cfg *config) start1(i int) {
 				for j := 0; j < len(cfg.logs); j++ {
 					if old, oldok := cfg.logs[j][m.Index]; oldok && old != v {
 						// 此时每个server的数据是什么样子的呢？打印出来
-						for _,raft := range cfg.rafts {
-							if raft != nil{
-								log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
-							}
-						}
+						//for _,raft := range cfg.rafts {
+						//	if raft != nil{
+						//		log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
+						//	}
+						//}
 						// some server has already committed a different value for this entry!
 						err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 							m.Index, i, m.Command, j, old)
@@ -170,9 +170,9 @@ func (cfg *config) start1(i int) {
 				//	log.Println(fmt.Sprintf("cfg.logs[%v][%v] is %v",i,m.Index,v))
 				//}
 				if m.Index > 1 && prevok == false {
-					for i:=0;i<cfg.n;i++ {
-						log.Println(cfg.rafts[i].Detail())
-					}
+					//for i:=0;i<cfg.n;i++ {
+					//	log.Println(cfg.rafts[i].Detail())
+					//}
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
@@ -180,6 +180,11 @@ func (cfg *config) start1(i int) {
 			}
 
 			if err_msg != "" {
+				for _,raft := range cfg.rafts {
+					if raft != nil{
+						log.Println(raft.Detail()) // 理论上此时能成为新的leader的随便哪一个都行
+					}
+				}
 				log.Fatalf("apply error: %v\n", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
