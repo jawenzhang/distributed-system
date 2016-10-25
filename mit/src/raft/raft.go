@@ -280,6 +280,7 @@ type AppendEntiesReply struct {
 	Term      int  // currentTerm, for leader to update itself
 	Success   bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 	NextIndex int  // 为了加快寻找，直接返回下一个需要传递的日志下标
+	FollowerCommitIndex int // 调试用
 	ConflictTerm int // 不一致的任期
 	ConflictIndex int // 不一致任期的最后一个index
 }
@@ -302,8 +303,8 @@ func (rf *Raft) reqMoreUpToDate(args *RequestVoteArgs) bool {
 
 func (rf *Raft) Detail() string {
 	detail := fmt.Sprintf("server:%d,currentTerm:%d,role:%s\n", rf.me, rf.currentTerm, convertStateToString(rf.state))
-	detail += fmt.Sprintf("commitIndex:%d,lastApplied:%d\n", rf.commitIndex, rf.lastApplied)
-	detail += fmt.Sprintf("log is:%v\n", rf.log[rf.lastApplied:rf.commitIndex+1])
+	detail += fmt.Sprintf("commitIndex:%d,lastApplied:%d,len(log):%d\n", rf.commitIndex, rf.lastApplied,len(rf.log))
+	detail += fmt.Sprintf("log is:%v\n", rf.log[rf.lastApplied:])
 	detail += fmt.Sprintf("nextIndex is:%v\n", rf.nextIndex)
 	detail += fmt.Sprintf("matchIndex is:%v\n", rf.matchIndex)
 	return detail
@@ -382,7 +383,13 @@ func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 //}
 
 func (r *Raft)commitTo(tocommit int){
+	if tocommit > r.lastIndex() {
+		r.logger.Error("new commitIndex:%d is bigger than lastIndex:%d",tocommit,r.lastIndex())
+		panic(" tocommit > r.lastIndex() ")
+	}
+
 	if r.commitIndex < tocommit {
+		//r.logger.Info("%d update commit:%d to %d",r.me, r.commitIndex,tocommit)
 		r.commitIndex = tocommit
 		r.commitc <- tocommit
 	}else {
@@ -400,13 +407,15 @@ func (rf *Raft) updateCommitIndex() {
 	for _,v := range rf.matchIndex {
 		mis = append(mis,v)
 	}
-	sort.Sort(mis)
-	mci := mis[rf.quorum()-1]
+	sort.Sort(sort.Reverse(mis))
+	mci := mis[rf.quorum()-1] // 应该是从大到小排序
 	if mci > rf.commitIndex && rf.log[mci].Term == rf.currentTerm {
+		// 此处由于
 		//rf.logger.Info("%v,mci:%d,commitIndex:%d",mis,mci,rf.commitIndex)
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
 		//log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
+		//rf.logger.Info("leader:%d update commitIndex to:%d, matchIndex:%v",rf.me,mci,rf.matchIndex)
 		rf.commitTo(mci)
 	}
 }
@@ -482,7 +491,6 @@ func (rf *Raft) stateMachine(applyCh chan ApplyMsg) {
 					panic("stateMachine error")
 				}
 				lastApplied := rf.lastApplied
-				rf.lastApplied = commitIndex
 				for i := lastApplied + 1; i <= commitIndex; i++ {
 					applymsg := ApplyMsg{
 						Index:   rf.log[i].Index,
@@ -490,6 +498,7 @@ func (rf *Raft) stateMachine(applyCh chan ApplyMsg) {
 					}
 					applyCh <- applymsg // 此处可能阻塞
 				}
+				rf.lastApplied = commitIndex
 				// 应用完状态机后，更新rf.lastApplied
 			}
 		case <- rf.stopc:
@@ -636,16 +645,46 @@ func (r *Raft)matchTerm(index, term int)bool {
 	return index <= r.lastIndex() && r.log[index].Term == term
 }
 
-//func (r *Raft)findConflict(ents []Log) int{
-//	for i:=0; i<len(ents);i++ {
-//		if !r.matchTerm(ents[i].Index,ents[i].Term){
-//			return ents[i].Index
-//		}
-//	}
-//	return 0
-//}
+func (r *Raft)term(index int)int {
+	return r.log[index].Term
+}
 
-func (rf *Raft)handleAppendEntries(m *Message) {
+func (r *Raft)findConflict(ents []Log) int{
+	for _,ne := range ents {
+		if !r.matchTerm(ne.Index,ne.Term){
+			if ne.Index <= r.lastIndex() {
+				r.logger.Info("found conflict at index %d [existing term: %d, conflicting term: %d]",
+					ne.Index, r.term(ne.Index), ne.Term)
+			}
+			return ne.Index
+		}
+	}
+	return 0
+}
+
+func (r*Raft)appendLog(ents ...Log)int{
+	if len(ents) == 0 {
+		return r.lastIndex()
+	}
+	if after := ents[0].Index - 1; after < r.commitIndex {
+		r.logger.Error("after(%d) is out of range [committed(%d)]", after, r.commitIndex)
+		panic("appendLog")
+	}
+	r.log = r.log[:ents[0].Index]
+	r.log = append(r.log,ents...)
+	return r.lastIndex()
+}
+
+func (r *Raft)handleAppendEntries(m *Message) {
+	defer func() {
+		//检查，强校验
+		reply := m.reply.(*AppendEntiesReply)
+		if reply.NextIndex > r.lastIndex() + 1 {
+			r.logger.Error("reply.NextIndex > rf.lastIndex() + 1")
+			panic("reply.NextIndex > rf.lastIndex() + 1")
+		}
+	}()
+
 	args := m.args.(AppendEntiesArgs)
 	reply := m.reply.(*AppendEntiesReply)
 	//if m.Term < rf.currentTerm {
@@ -653,31 +692,76 @@ func (rf *Raft)handleAppendEntries(m *Message) {
 	//	reply.Success = false
 	//	return
 	//}
-	rf.electionElapsed = 0
-	rf.lead = m.From
-	if args.PrevLogIndex < rf.commitIndex {
+	r.electionElapsed = 0
+	r.lead = m.From
+	//if args.PrevLogIndex < rf.commitIndex || args.LeaderCommit < rf.commitIndex {
+	if args.PrevLogIndex < r.commitIndex {
+		// 此处不加上args.LeaderCommit < rf.commitIndex，因为新leader的请求就是会出现小于follower的情况
+		// 此处是过期的请求，可能会出现过期的请求，
+		// 但是一旦出现 args.LeaderCommit < rf.commitIndex，代表的不是过期，而是 leader的commiIndex更新太慢了，要快速更新
+		//if args.LeaderCommit < rf.commitIndex {
+		//	rf.logger.Error("leader:%d has older commmit:%d than follower:%d commit:%d",args.LeaderId,args.LeaderCommit,rf.me,rf.commitIndex)
+		//	panic("args.LeaderCommit < rf.commitIndex")
+		//}
+		// 如果此处 PrevLogIndex = 440, rf.commitIndex = 441
+		// 则 reply.NextIndex = 442
+		// len(args.Entries) == 0, args.LeaderCommit = 439
+		// leader lastIndex:440，可能吗？如果出现这种错误，就是选举的时候出现了错误
+
 		// 乱序的请求，返回正确的 commitIndex
 		//rf.logger.Info("follower:%d receives unordered appendrpc",rf.me)
-		reply.Term = rf.currentTerm
+		reply.Term = r.currentTerm
 		reply.Success = true
-		reply.NextIndex = rf.commitIndex + 1
+		reply.NextIndex = r.commitIndex + 1
+		reply.FollowerCommitIndex = r.commitIndex
 		//reply.NextIndex = max(rf.replyNextIndex,rf.commitIndex+1)
 		return
 	}
-	if rf.matchTerm(args.PrevLogIndex,args.PrevLogTerm){
+	if r.matchTerm(args.PrevLogIndex,args.PrevLogTerm){
+		// 因为此处可能后传来的日志 PrevLogIndex + len(args.Entries) 少了，这个怎么办呢？
 		nexti := args.PrevLogIndex + len(args.Entries)  + 1
+		//lastnewi := args.PrevLogIndex + len(args.Entries)
+		ci := r.findConflict(args.Entries)
+
+		switch  {
+		case ci == 0:
+		case ci <= r.commitIndex:
+			r.logger.Error("entry %d conflict with committed entry [committed(%d)]", ci, r.commitIndex)
+			panic("ci <= r.commitIndex")
+		default:
+			offset := args.PrevLogIndex + 1
+			r.appendLog(args.Entries[ci-offset:]...)
+		}
+
 		// 此处为什么不直接返回 len(rf.log)，因为可能 args.Entries == 0，但是本地的log日志长度长
-		if len(args.Entries) > 0 {
-			rf.log = rf.log[:args.PrevLogIndex+1]
-			rf.log = append(rf.log,args.Entries...)
-			rf.checkLog(1)
+		//if len(args.Entries) > 0 {
+		//	r.log = r.log[:args.PrevLogIndex+1]
+		//	r.log = append(r.log,args.Entries...)
+		r.checkLog(1)
+		//}
+		if args.LeaderCommit > r.commitIndex {
+			if args.LeaderCommit > r.lastIndex() {
+				r.logger.Error("%d [LeaderCommit:%d PrevLogIndex:%d len(entries):%d]",args.LeaderId,args.PrevLogIndex,len(args.Entries))
+				panic("args.LeaderCommit > rf.lastIndex()")
+			}
+			//rf.commitTo(min(args.LeaderCommit, rf.lastIndex()))
+			r.commitTo(args.LeaderCommit)
+		}else {
+			// 此处还是可能是过期的请求
+			//if args.LeaderCommit < rf.commitIndex {
+			//	//rf.logger.Error("leader:%d has older commmit:%d than follower:%d commit:%d",args.LeaderId,args.LeaderCommit,rf.me,rf.commitIndex)
+			//	rf.logger.Error("leader:%d PrevLogIndex:%d has older commmit:%d than follower:%d commit:%d",args.LeaderId,args.PrevLogIndex, args.LeaderCommit,rf.me,rf.commitIndex)
+			//	panic("args.LeaderCommit < rf.commitIndex")
+			//}
 		}
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitTo(min(args.LeaderCommit, rf.lastIndex()))
-		}
-		reply.Term = rf.currentTerm
+		reply.Term = r.currentTerm
 		reply.Success = true
 		reply.NextIndex = nexti
+		// 此处就是会不相等，因为老的请求会让的log变短
+		//if nexti != len(r.log) {
+		//	r.logger.Error("PrevLogIndex:%d len(args.Entries):%d len(r.log):%d",args.PrevLogIndex,len(args.Entries),len(r.log))
+		//	panic("append error")
+		//}
 	}else {
 		// 优化,怎么快速回滚？
 		// 如果follower拒绝了，那回复中包含：
@@ -687,24 +771,37 @@ func (rf *Raft)handleAppendEntries(m *Message) {
 		//​ 将nextIndex[i]设置为不一致任期的最后一个entry
 		// 否则：
 		//​ 将nextIndex[i]设置为follower返回的index
-		//reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-		//ConflictIndex := 0
-		//for ConflictIndex:=args.PrevLogIndex; ConflictIndex>0;ConflictIndex-- {
-		//	if rf.log[ConflictIndex-1].Term != reply.ConflictTerm {
-		//		break
-		//	}
-		//}
-		//reply.ConflictIndex = ConflictIndex
-		rf.logger.Info("follow:%d matchTerm(%d,%d) fail, len(log):%d commitIndex:%d",rf.me,args.PrevLogIndex,args.PrevLogTerm,len(rf.log),rf.commitIndex)
-		reply.Term = rf.currentTerm
+		// 如果此时都不存在 PrevLogIndex，则返回别的
+		if args.PrevLogIndex <= r.lastIndex() {
+			reply.ConflictTerm = r.log[args.PrevLogIndex].Term // Term > 0
+			ConflictIndex := 0
+			for ConflictIndex:=args.PrevLogIndex; ConflictIndex>0;ConflictIndex-- {
+				if r.log[ConflictIndex-1].Term != reply.ConflictTerm {
+					break
+				}
+			}
+			reply.ConflictIndex = ConflictIndex
+		}else {
+			reply.ConflictTerm = -1
+			reply.ConflictIndex = -1
+		}
+
+		//rf.logger.Info("follow:%d matchTerm(%d,%d) fail, len(log):%d commitIndex:%d",rf.me,args.PrevLogIndex,args.PrevLogTerm,len(rf.log),rf.commitIndex)
+		reply.Term = r.currentTerm
 		reply.Success = false
-		reply.NextIndex = min(rf.commitIndex + 1, args.PrevLogIndex - 1) //
+		// if PrevLogIndex = 1 and commitIndex = 0,
+		// then NextIndex = 0
+		reply.NextIndex = min(r.commitIndex + 1, args.PrevLogIndex - 1) //
+		if reply.NextIndex < 1 {
+			reply.NextIndex = 1
+		}
 	}
 	if reply.NextIndex < 1 {
-		rf.logger.Error("args.PrevLogIndex:%d,args.PrevLogTerm:%d,rf.log:%v",args.PrevLogIndex,args.PrevLogTerm,rf.log)
+		r.logger.Error("args.PrevLogIndex:%d,args.PrevLogTerm:%d,rf.log:%v",args.PrevLogIndex,args.PrevLogTerm, r.log)
 		panic("reply.NextIndex < 1")
 	}
-	rf.replyNextIndex = reply.NextIndex
+	r.replyNextIndex = reply.NextIndex
+	reply.FollowerCommitIndex = r.commitIndex
 }
 
 // follower收到投票请求和append
@@ -718,12 +815,15 @@ func stepFollower(rf *Raft, m *Message){
 		if (rf.votedFor == None || rf.votedFor == args.CandidateId) && rf.reqMoreUpToDate(&args){
 			rf.electionElapsed = 0
 			rf.logger.Info("%x [logterm: %d, index: %d, vote: %x] voted for %x [logterm: %d, index: %d] at term %d",
-				rf.me, rf.lastTerm(), rf.lastIndex(), rf.votedFor, args.CandidateId, args.Term, args.LastLogIndex, rf.currentTerm)
+				rf.me, rf.lastTerm(), rf.lastIndex(), rf.votedFor, args.CandidateId, args.LastLogTerm, args.LastLogIndex, rf.currentTerm)
 			rf.votedFor = args.CandidateId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 
 		}else {
+			rf.logger.Info("%x [logterm: %d, index: %d, vote: %x] refuse for %x [logterm: %d, index: %d] at term %d",
+				rf.me, rf.lastTerm(), rf.lastIndex(), rf.votedFor, args.CandidateId, args.LastLogTerm, args.LastLogIndex, rf.currentTerm)
+
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 		}
@@ -780,17 +880,48 @@ func stepLeader(r *Raft, m *Message){
 	case MsgAppResp:
 		args := m.args.(AppendEntiesArgs)
 		reply := m.reply.(*AppendEntiesReply)
+		//if (r.nextIndex[m.From] >= reply.NextIndex) {
+		//	return
+		//}
+			//if args.PrevLogIndex < rf.commitIndex || args.LeaderCommit < rf.commitIndex {
+			// 此处是过期的请求，可能会出现，过期的请求
 		if reply.NextIndex > r.lastIndex()+1 {
 			r.logger.Error("MsgAppResp reject:%v [PrevLogIndex:%d PrevLogTerm:%d commitIndex:%d Entries's len:%d]",!reply.Success, args.PrevLogIndex,args.PrevLogTerm,r.commitIndex,len(args.Entries))
-			r.logger.Error("%d [term:%d nextIndex:%d] is bigger than leader:%d [term:%d lastIndex:%d]",m.From,m.Term ,reply.NextIndex,r.me,r.currentTerm,r.lastIndex())
+			r.logger.Error("%d [term:%d nextIndex:%d commitIndex:%d] is bigger than leader:%d [term:%d lastIndex:%d]",m.From,m.Term ,reply.NextIndex,reply.FollowerCommitIndex, r.me,r.currentTerm,r.lastIndex())
 			r.checkLog("reply.NextIndex > r.lastIndex()+1")
 			panic("reply.NextIndex > r.lastIndex()+1")
 		}
-		r.nextIndex[m.From] = reply.NextIndex
 		if reply.Success { // 匹配成功
-			r.matchIndex[m.From] = reply.NextIndex - 1
+			// 如果 reply.NextIndex < r.nextIndex[m.From]，意味着已经跟新过了 matchIndex 了，无需再次更新
+			if reply.NextIndex >= r.nextIndex[m.From] {
+				r.nextIndex[m.From] = reply.NextIndex
+				r.matchIndex[m.From] = reply.NextIndex - 1
+				r.updateCommitIndex()
+			}
 			// 如果此时matchIndex都没有更新，有问题，因此matchIndex的更新时机是此处
-			r.updateCommitIndex()
+		} else {
+			// 优化：快速next
+			// 优化,怎么快速回滚？
+			// 如果follower拒绝了，那回复中包含：
+			// 不一致entry的任期（term）
+			// 不一致任期的第一个entry的下标
+			// 如果leader知道不一致的任期：
+			//​ 将nextIndex[i]设置为不一致任期的最后一个entry
+			// 否则：
+			//​ 将nextIndex[i]设置为follower返回的index
+			nexti := 0
+			for i:=args.PrevLogIndex-1;i>0;i-- {
+				if r.log[i].Term == reply.ConflictTerm {
+					// 找到了第一个不一致的任期
+					nexti = i
+					break
+				}
+			}
+			if nexti == 0 && reply.ConflictIndex > 0{
+				r.nextIndex[m.From] = reply.ConflictIndex
+			} else {
+				r.nextIndex[m.From] = reply.NextIndex
+			}
 		}
 	case MsgVoteResp:
 		r.logger.Info("leader:%d [term:%d] receives overdue MsgVoteResp from %d [term:%d]",r.me,r.currentTerm,m.From,m.Term)
@@ -811,6 +942,7 @@ func (r *Raft)Step(m *Message) error{
 	r.logger.Debug("%d received msg:%s from %d at term:%d",m.To,MessageType_name[int(m.Type)],m.From,m.Term)
 	switch {
 	case m.Term > r.currentTerm:
+		r.logger.Info("%d:%s [term:%d] smaller than %d [term:%d] become follower",r.me, convertStateToString(r.state) ,r.currentTerm,m.From,m.Term)
 		r.becomeFollower(m.Term,None)
 	case m.Term < r.currentTerm:
 		// 过期的请求和响应，just response with false
@@ -980,16 +1112,16 @@ func (raft *Raft)becomeFollower(term int, lead int) {
 	raft.logger.Info("%x became follower at term %d", raft.me, raft.currentTerm)
 }
 
-func (raft *Raft)becomeCandidate() {
-	if raft.state == StateLeader {
+func (r *Raft)becomeCandidate() {
+	if r.state == StateLeader {
 		panic("invalid transition [leader -> candidate]")
 	}
-	raft.reset(raft.currentTerm+1)
-	raft.tick = raft.tickElection
-	raft.votedFor = raft.me
-	raft.state = StateCandidate
-	raft.step = stepCandidate
-	raft.logger.Info("%x became candidate at term %d", raft.me, raft.currentTerm)
+	r.reset(r.currentTerm+1)
+	r.tick = r.tickElection
+	r.votedFor = r.me
+	r.state = StateCandidate
+	r.step = stepCandidate
+	r.logger.Info("%x became candidate at term %d", r.me, r.currentTerm)
 }
 func (r *Raft) becomeLeader() {
 	if r.state == StateFollower {
@@ -1005,7 +1137,7 @@ func (r *Raft) becomeLeader() {
 		// 此处不应该更新 r.matchIndex[i]，只有当真正匹配的时候才更新
 		//r.matchIndex[i] = r.nextIndex[i] - 1
 	}
-	r.logger.Info("%x became leader at term %d", r.me, r.currentTerm)
+	r.logger.Info("%x became leader at term %d commitIndex:%d", r.me, r.currentTerm, r.commitIndex)
 }
 
 //
