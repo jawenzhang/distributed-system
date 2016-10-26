@@ -3,7 +3,7 @@
 
 mit目录下是:mit的6.824 《Distributed Systems 》课程
 
-etcd-raft:是基于etcd-raft的一个简单的k/v系统，包含一些代码注释，一个代码走读的地址: [raft 系列解读(4) 之 etcd-raft学习
+etcd-raft:是基于etcd-raft的一个简单的k/v系统，包含一些代码注释，一个代码走读的地址: [raft 系列解读(4) 之 etcd-raft学习](http://blog.zhuanxu.org/2016-10-18-raft-etcd-learning.html)
 
 
 
