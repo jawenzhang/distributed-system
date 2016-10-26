@@ -157,17 +157,22 @@ func (cfg *config) makeClient(to []int) *Clerk {
 	defer cfg.mu.Unlock()
 
 	// a fresh set of ClientEnds.
+	// 创建 n 个客户端
 	ends := make([]*labrpc.ClientEnd, cfg.n)
+	// 创建 n 个客户端的名字
 	endnames := make([]string, cfg.n)
 	for j := 0; j < cfg.n; j++ {
 		endnames[j] = randstring(20)
 		ends[j] = cfg.net.MakeEnd(endnames[j])
+		// 将客户端和server连接起来 server的名字即为数组 0,1,2,3...
 		cfg.net.Connect(endnames[j], j)
 	}
-
+	// 每一个endnames都和后端的服务连接
+	// 将客户端传入随机的打乱后传入
 	ck := MakeClerk(random_handles(ends))
 	cfg.clerks[ck] = endnames
 	cfg.nextClientId++
+	// 让 ck的 客户端 enable
 	cfg.ConnectClientUnlocked(ck, to)
 	return ck
 }

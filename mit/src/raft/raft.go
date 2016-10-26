@@ -62,6 +62,8 @@ const (
 	MsgApp MessageType = 1
 	MsgVoteResp MessageType = 2
 	MsgAppResp MessageType = 3
+	MsgStart MessageType = 4
+	MsgState MessageType = 5
 )
 
 var MessageType_name = map[int]string{
@@ -69,6 +71,8 @@ var MessageType_name = map[int]string{
 	1:  "MsgApp",
 	2:  "MsgVoteResp",
 	3:  "MsgAppResp",
+	4:  "MsgStart",
+	5:	"MsgState",
 }
 
 type Message struct{
@@ -191,14 +195,20 @@ type Log struct {
 
 // return currentTerm and whether this server
 // believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isLeader bool
-	// Your code here.
-	term = rf.currentTerm
-	isLeader = rf.state == StateLeader
-	return term, isLeader
+func (r *Raft) GetState() (int, bool) {
+	// 此处没有必要通过 chan 来读取
+	// 为什么呢，因为即使你保证了两个状态是一致的，但是在返回给客户端的时候，可能已经变化了
+	// 本来就保证不了数据是最新的
+	//m := &Message{
+	//	Type:MsgState,
+	//	done:make(chan bool),
+	//}
+	//rf.commandc <- m
+	//<- m.done
+	// 2)Leader将请求的日志以并发的形式,发送AppendEntries RCPs给所有的服务器
+	//go rf.bcastAppend() // 那在哪儿执行应用到状态机的操作呢？在stateMachine中
+	//log.Println("broadcastAppendEntriesRPC")
+	return r.currentTerm,r.state == StateLeader
 }
 
 //
@@ -345,18 +355,19 @@ func max(x, y int) int {
 }
 
 // 外部的调用
-func (rf *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
+func (r *Raft) AppendEnties(args AppendEntiesArgs, reply *AppendEntiesReply) {
 	m := &Message{
 		Type:MsgApp,
 		From:args.LeaderId,
-		To:rf.me,
+		To:r.me,
 		Term:args.Term,
 		svcMeth:"Raft.AppendEnties",
 		args:args,
 		reply:reply,
 		done:make(chan bool),
 	}
-	rf.recvc <- m
+	//r.logger.Notice("%d [term:%d] refuse %d [term:%d] [message:%d]",m.To,r.currentTerm,m.From,m.Term,*m)
+	r.recvc <- m
 	<- m.done
 }
 
@@ -389,7 +400,7 @@ func (r *Raft)commitTo(tocommit int){
 	}
 
 	if r.commitIndex < tocommit {
-		//r.logger.Info("%d update commit:%d to %d",r.me, r.commitIndex,tocommit)
+		//r.logger.Notice("%d update commit:%d to %d",r.me, r.commitIndex,tocommit)
 		r.commitIndex = tocommit
 		r.commitc <- tocommit
 	}else {
@@ -415,7 +426,7 @@ func (rf *Raft) updateCommitIndex() {
 		// 此时只能说 newCommitIndex 具备了能提交的可能性，但是还要保证 log[newCommitIndex].term == currentTerm 才能提交
 		// 原因参见5.4.2
 		//log.Println("leader:",rf.me,"update commitIndex to",newCommitIndex)
-		//rf.logger.Info("leader:%d update commitIndex to:%d, matchIndex:%v",rf.me,mci,rf.matchIndex)
+		//rf.logger.Notice("leader:%d update commitIndex to:%d, matchIndex:%v",rf.me,mci,rf.matchIndex)
 		rf.commitTo(mci)
 	}
 }
@@ -440,16 +451,18 @@ func (rf *Raft) updateCommitIndex() {
 // 第三个返回值表明当前server是否是leader
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	//index := -1
-	//term := -1
-	//isLeader := true
 
-	//if rf.state != StateLeader {
-	//	isLeader = false
-	//	return index, term, isLeader
-	//}
+	index := -1
+	term := -1
+	isLeader := true
 
+	if rf.state != StateLeader {
+		isLeader = false
+		return index, term, isLeader
+	}
+	// 只有是leader了，才串行的进行操作
 	m := &Message{
+		Type:MsgStart,
 		data:command,
 		done:make(chan bool),
 	}
@@ -496,6 +509,7 @@ func (rf *Raft) stateMachine(applyCh chan ApplyMsg) {
 						Index:   rf.log[i].Index,
 						Command: rf.log[i].Command,
 					}
+					//rf.logger.Notice("%d apply index:%d to app",rf.me,i)
 					applyCh <- applymsg // 此处可能阻塞
 				}
 				rf.lastApplied = commitIndex
@@ -591,6 +605,7 @@ func (rf *Raft)bcastAppend(){
 				PrevLogTerm:  rf.log[prevLogIndex].Term,
 				Entries:      rf.log[prevLogIndex + 1:], // 如果没有新日志，自然而然是空
 			}
+			//rf.logger.Alert("leader:%d args.entries:%v log:%v",rf.me,args.Entries,rf.log)
 			m := &Message{
 				Type:MsgApp,
 				From:rf.me,
@@ -653,8 +668,9 @@ func (r *Raft)findConflict(ents []Log) int{
 	for _,ne := range ents {
 		if !r.matchTerm(ne.Index,ne.Term){
 			if ne.Index <= r.lastIndex() {
-				r.logger.Info("found conflict at index %d [existing term: %d, conflicting term: %d]",
-					ne.Index, r.term(ne.Index), ne.Term)
+				r.logger.Info("%d found conflict at index %d [existing term: %d, conflicting term: %d]",
+					r.me, ne.Index, r.term(ne.Index), ne.Term)
+				//r.logger.Info("%v",ents)
 			}
 			return ne.Index
 		}
@@ -676,11 +692,15 @@ func (r*Raft)appendLog(ents ...Log)int{
 }
 
 func (r *Raft)handleAppendEntries(m *Message) {
+	//r.logger.Notice("%d receive heart beat from %d",m.To,m.From)
 	defer func() {
 		//检查，强校验
 		reply := m.reply.(*AppendEntiesReply)
+		//args := m.args.(AppendEntiesArgs)
 		if reply.NextIndex > r.lastIndex() + 1 {
-			r.logger.Error("reply.NextIndex > rf.lastIndex() + 1")
+			//r.logger.Error("args:%v",args)
+			//r.logger.Alert("follow:%d args.entries:%v log:%v",r.me,args.Entries,r.log)
+			r.logger.Error("reply.NextIndex:%d > rf.lastIndex():%d + 1",reply.NextIndex,r.lastIndex())
 			panic("reply.NextIndex > rf.lastIndex() + 1")
 		}
 	}()
@@ -878,6 +898,7 @@ func stepLeader(r *Raft, m *Message){
 	//defer close(m.done)
 	switch m.Type {
 	case MsgAppResp:
+		//r.logger.Notice("%d handle MsgAppResp from %d log:%v",r.me,m.From,r.log)
 		args := m.args.(AppendEntiesArgs)
 		reply := m.reply.(*AppendEntiesReply)
 		//if (r.nextIndex[m.From] >= reply.NextIndex) {
@@ -892,6 +913,7 @@ func stepLeader(r *Raft, m *Message){
 			panic("reply.NextIndex > r.lastIndex()+1")
 		}
 		if reply.Success { // 匹配成功
+			//r.logger.Notice("%d accept %d [reply.NextIndex:%d r.nextIndex:%d]",m.From,m.To,reply.NextIndex,r.nextIndex[m.From])
 			// 如果 reply.NextIndex < r.nextIndex[m.From]，意味着已经跟新过了 matchIndex 了，无需再次更新
 			if reply.NextIndex >= r.nextIndex[m.From] {
 				r.nextIndex[m.From] = reply.NextIndex
@@ -900,6 +922,7 @@ func stepLeader(r *Raft, m *Message){
 			}
 			// 如果此时matchIndex都没有更新，有问题，因此matchIndex的更新时机是此处
 		} else {
+			//r.logger.Notice("%d refuse %d PrevLogIndex:%d PrevLogTerm:%d",m.From,m.To,args.PrevLogIndex,args.PrevLogTerm)
 			// 优化：快速next
 			// 优化,怎么快速回滚？
 			// 如果follower拒绝了，那回复中包含：
@@ -949,6 +972,8 @@ func (r *Raft)Step(m *Message) error{
 		switch m.Type {
 		case MsgApp:
 			reply := m.reply.(*AppendEntiesReply)
+			//args := m.args.(AppendEntiesArgs)
+			//r.logger.Notice("%d [term:%d] refuse %d [term:%d] [message:%d]",m.To,r.currentTerm,m.From,m.Term,*m)
 			reply.Term = r.currentTerm
 			reply.NextIndex = r.commitIndex+1
 			reply.Success = false
@@ -1000,7 +1025,8 @@ func (r *Raft)serveChannels() {
 //		}
 //	}
 //}
-func (r *Raft)handleCommand(m *Message){
+func (r *Raft)handleStart(m *Message) {
+	//r.logger.Notice("%d handle start command",r.me)
 	if r.state != StateLeader {
 		m.Index = -1
 		m.Term = -1
@@ -1010,6 +1036,7 @@ func (r *Raft)handleCommand(m *Message){
 		command := m.data
 		term := r.currentTerm
 		index := len(r.log)
+		//panic(fmt.Sprint(command))
 		r.log = append(r.log,Log{Term:term,Index:index,Command:command})
 		m.Term = term
 		m.Index = index
@@ -1022,6 +1049,21 @@ func (r *Raft)handleCommand(m *Message){
 		//r.persist()
 		r.bcastAppend()
 		m.done <- true
+	}
+}
+func (r *Raft)handleState(m *Message) {
+	m.isLeader = r.state == StateLeader
+	m.Term = r.currentTerm
+	m.done <- true
+}
+func (r *Raft)handleCommand(m *Message){
+	switch m.Type {
+	case MsgStart:
+		r.handleStart(m)
+	case MsgState:
+		r.handleState(m)
+	default:
+		panic("un supported command")
 	}
 }
 
@@ -1058,7 +1100,7 @@ func (r *Raft)run() {
 		case m := <- r.recvc: // 收到消息和回复
 			r.Step(m)
 		case m := <- r.commandc: // 进行 start 命令
-			r.handleCommand(m)
+			r.handleCommand(m) // 此处完全可以通过 goroutine 执行,出现错误
 		case <- r.stopc:
 			return
 		}
@@ -1097,7 +1139,7 @@ func (raft *Raft)reset(term int) {
 	//raft.commitIndex = 0
 	raft.replyNextIndex = 1
 	if raft.log == nil {
-		raft.log = []Log{{Term: raft.currentTerm, Index: 0}}
+		raft.log = []Log{{Term: 1, Index: 0}}
 	}
 	raft.nextIndex = make([]int,len(raft.peers))
 	raft.matchIndex = make([]int,len(raft.peers))
@@ -1140,6 +1182,10 @@ func (r *Raft) becomeLeader() {
 	r.logger.Info("%x became leader at term %d commitIndex:%d", r.me, r.currentTerm, r.commitIndex)
 }
 
+func (r *Raft)SetLogger(logger *logs.BeeLogger) {
+	r.logger = logger
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -1169,7 +1215,8 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.logger = logs.NewLogger()
 	rf.logger.SetLogger(logs.AdapterConsole)
 	//rf.logger.SetLevel(logs.LevelError)
-	rf.logger.SetLevel(logs.LevelInformational)
+	//rf.logger.SetLevel(logs.LevelInformational)
+	rf.logger.SetLevel(logs.LevelNotice)
 	rf.logger.EnableFuncCallDepth(true) // 输出行号和文件名
 
 	//rf.applyCh = applyCh
@@ -1182,7 +1229,7 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	rf.becomeFollower(1,None)
 	rf.readPersist(persister.ReadRaftState())
-
+	//rf.logger.Info("log:%v",rf.log)
 	go rf.run()
 	go rf.serveChannels()
 	go rf.stateMachine(applyCh)

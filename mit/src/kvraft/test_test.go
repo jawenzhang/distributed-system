@@ -132,7 +132,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 	const nservers = 5
 	cfg := make_config(t, tag, nservers, unreliable, maxraftstate)
 	defer cfg.cleanup()
-
+	// 将ck都打开
 	ck := cfg.makeClient(cfg.All())
 
 	done_partitioner := int32(0)
@@ -143,7 +143,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
+		//log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -157,12 +157,12 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
-					// log.Printf("%d: client new append %v\n", cli, nv)
+					 //log.Printf("%d: client new append %v\n", cli, nv)
 					myck.Append(key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					 //log.Printf("%d: client new get %v\n", cli, key)
 					v := myck.Get(key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
@@ -172,6 +172,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		})
 
 		if partitions {
+			// 是否网络分区
 			// Allow the clients to perform some operations without interruption
 			time.Sleep(1 * time.Second)
 			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
@@ -209,15 +210,15 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			cfg.ConnectAll()
 		}
 
-		// log.Printf("wait for clients\n")
+		//log.Print("wait for clients\n")
 		for i := 0; i < nclients; i++ {
-			// log.Printf("read from clients %d\n", i)
+			//log.Printf("read from clients %d\n", i)
 			j := <-clnts[i]
 			if j < 10 {
 				log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			}
 			key := strconv.Itoa(i)
-			// log.Printf("Check %v for client %d\n", j, i)
+			//log.Printf("Check %v for client %d\n", j, i)
 			v := ck.Get(key)
 			checkClntAppends(t, i, v, j)
 		}
@@ -394,6 +395,8 @@ func TestPersistPartitionUnreliable(t *testing.T) {
 	GenericTest(t, "persistpartunreliable", 5, true, true, true, -1)
 }
 
+// 下面开始需要加上快照功能了
+// TODO:SnapshotRPC
 //
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
